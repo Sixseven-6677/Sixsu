@@ -3,13 +3,16 @@ import { InitializationManager } from "./InitializationManager";
 import { SystemLoader } from "./SystemLoader";
 import { buildStartupSteps, runStartupSteps } from "./lifecycle/startup";
 import { buildShutdownSteps, runShutdownSteps } from "./lifecycle/shutdown";
+import { LoggerManager } from "../logger/LoggerManager";
+
+const log = LoggerManager.getLogger("Bot");
 
 export enum BotState {
-  IDLE = "IDLE",
+  IDLE     = "IDLE",
   STARTING = "STARTING",
-  RUNNING = "RUNNING",
+  RUNNING  = "RUNNING",
   STOPPING = "STOPPING",
-  STOPPED = "STOPPED",
+  STOPPED  = "STOPPED",
 }
 
 export class Bot {
@@ -39,13 +42,13 @@ export class Bot {
     }
 
     this.state = BotState.STARTING;
-    console.log("[Bot] Starting...");
+    log.info("Starting...");
 
     const systems = this.loader.getResolved();
 
     const steps = buildStartupSteps(systems, (name) => {
       this.loader.setStatus(name, SystemStatus.INITIALIZING);
-      console.log(`[Bot] Initializing system: ${name}`);
+      log.info(`Initializing system: ${name}`);
     });
 
     try {
@@ -56,11 +59,11 @@ export class Bot {
       }
 
       this.state = BotState.RUNNING;
-      console.log("[Bot] All systems ready.", this.loader.summary());
+      log.info("All systems ready.", this.loader.summary() as unknown as Record<string, unknown>);
     } catch (err) {
       this.state = BotState.STOPPED;
       throw new Error(
-        `[Bot] Startup failed: ${err instanceof Error ? err.message : String(err)}`
+        `Startup failed: ${err instanceof Error ? err.message : String(err)}`
       );
     }
 
@@ -68,18 +71,16 @@ export class Bot {
   }
 
   async stop(): Promise<void> {
-    if (this.state !== BotState.RUNNING) {
-      return;
-    }
+    if (this.state !== BotState.RUNNING) return;
 
     this.state = BotState.STOPPING;
-    console.log("[Bot] Shutting down...");
+    log.info("Shutting down...");
 
     const systems = this.loader.getResolved();
 
     const steps = buildShutdownSteps(systems, (name) => {
       this.loader.setStatus(name, SystemStatus.DESTROYING);
-      console.log(`[Bot] Destroying system: ${name}`);
+      log.info(`Destroying system: ${name}`);
     });
 
     try {
@@ -89,10 +90,11 @@ export class Bot {
         this.loader.setStatus(system.name, SystemStatus.DESTROYED);
       }
     } catch (err) {
-      console.error("[Bot] Error during shutdown:", err);
+      log.error("Error during shutdown.", err);
     } finally {
       this.state = BotState.STOPPED;
-      console.log("[Bot] Stopped.");
+      log.info("Stopped.");
+      LoggerManager.close();
     }
   }
 
@@ -102,12 +104,12 @@ export class Bot {
 
   private registerShutdownSignals(): void {
     const handler = async (signal: string) => {
-      console.log(`[Bot] Received ${signal}.`);
+      log.info(`Received ${signal}.`);
       await this.stop();
       process.exit(0);
     };
 
-    process.once("SIGINT", () => handler("SIGINT"));
+    process.once("SIGINT",  () => handler("SIGINT"));
     process.once("SIGTERM", () => handler("SIGTERM"));
   }
 }
