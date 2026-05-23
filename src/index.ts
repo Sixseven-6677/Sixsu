@@ -114,7 +114,6 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
-  // Auth & Session
   const auth = new AuthManager();
 
   if (config.auth.appStateFile) {
@@ -190,15 +189,22 @@ async function bootstrap(): Promise<void> {
   setBanStore(banStore);
 
   // ─── Plugin System ────────────────────────────────────────────────────────
-  // PluginManager is registered last so all core systems are available when
-  // plugins call initialize(). It declares "scheduler" as a dependency so
-  // Bot.start() initialises it after the scheduler is ready.
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
-    pluginsDir:      path.resolve(config.plugins.dir),
-    watch:           config.plugins.watch,
+    pluginsDir: path.resolve(config.plugins.dir),
+    watch:      config.plugins.watch,
   });
+
+  // ── Core services — available to all plugins via ctx.consumeService() ──
+  // "command-registry" — consumed by /help to list all commands.
+  // "fb-access-token"  — consumed by utility plugin for Graph API calls.
+  // "facebook-client"  — consumed by plugins that need to send FB API requests.
+  const svcReg = pluginManager.getServiceRegistry();
+  svcReg.provide("command-registry",  registry,                        "core");
+  svcReg.provide("fb-access-token",   config.facebook.pageAccessToken, "core");
+  svcReg.provide("facebook-client",   client,                          "core");
+
   bot.register(pluginManager);
   // ─────────────────────────────────────────────────────────────────────────
 
