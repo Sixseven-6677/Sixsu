@@ -10,8 +10,12 @@ import { FacebookGateway } from "./facebook/FacebookGateway";
 import { CommandRegistry } from "./commands/CommandRegistry";
 import { CommandLoader } from "./commands/CommandLoader";
 import { CommandPipeline } from "./commands/CommandPipeline";
-import { loggingMiddleware } from "./commands/middleware/logging.middleware";
 import { typingMiddleware } from "./commands/middleware/typing.middleware";
+import { MiddlewareManager } from "./middleware/MiddlewareManager";
+import { createLoggingMiddleware } from "./middleware/built-in/logging.middleware";
+import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middleware";
+import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
+import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
 import { setCommandPipeline } from "./handlers/message.handler";
 
 async function bootstrap(): Promise<void> {
@@ -32,8 +36,17 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
+  const mwManager = new MiddlewareManager()
+    .register(createLoggingMiddleware())
+    .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
+    .register(createCooldownMiddleware({ durationMs: 3_000 }))
+    .register(createPermissionsMiddleware({ blocklist: [] }));
+
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
-    .use(loggingMiddleware)
+    .use(mwManager.fn("logging"))
+    .use(mwManager.fn("antispam"))
+    .use(mwManager.fn("cooldown"))
+    .use(mwManager.fn("permissions"))
     .use(typingMiddleware)
     .onNotFound(async (ctx) => {
       await ctx.reply(`❓ الأمر "${ctx.commandName}" غير موجود.`);
