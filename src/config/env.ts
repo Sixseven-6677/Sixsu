@@ -18,6 +18,10 @@ export const config = {
     verifyToken: requireEnv("FB_VERIFY_TOKEN"),
     appSecret: requireEnv("FB_APP_SECRET"),
   },
+  bot: {
+    prefix: process.env["BOT_PREFIX"] ?? "/",
+    commandsDir: process.env["COMMANDS_DIR"] ?? "src/commands/definitions",
+  },
 } as const;
 
 export type Config = typeof config;
