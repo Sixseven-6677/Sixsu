@@ -1,6 +1,7 @@
 import express, { Application } from "express";
 import { FacebookGateway } from "./facebook/FacebookGateway";
 import { createWebhookRouter } from "./routes/webhook.route";
+import { httpErrorHandler, notFoundHandler } from "./errors/handlers/HttpErrorHandler";
 
 export function createApp(gateway: FacebookGateway): Application {
   const app = express();
@@ -13,6 +14,9 @@ export function createApp(gateway: FacebookGateway): Application {
   });
 
   app.use("/webhook", createWebhookRouter(gateway));
+
+  app.use(notFoundHandler);
+  app.use(httpErrorHandler);
 
   return app;
 }
