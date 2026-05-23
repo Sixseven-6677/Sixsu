@@ -1,7 +1,8 @@
 import express, { Application } from "express";
-import webhookRouter from "./routes/webhook.route";
+import { FacebookGateway } from "./facebook/FacebookGateway";
+import { createWebhookRouter } from "./routes/webhook.route";
 
-export function createApp(): Application {
+export function createApp(gateway: FacebookGateway): Application {
   const app = express();
 
   app.use(express.json());
@@ -11,7 +12,7 @@ export function createApp(): Application {
     res.status(200).json({ status: "ok", uptime: process.uptime() });
   });
 
-  app.use("/webhook", webhookRouter);
+  app.use("/webhook", createWebhookRouter(gateway));
 
   return app;
 }
