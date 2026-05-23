@@ -22,6 +22,9 @@ export const config = {
     prefix: process.env["BOT_PREFIX"] ?? "/",
     commandsDir: process.env["COMMANDS_DIR"] ?? "src/commands/definitions",
   },
+  database: {
+    mongoUri: process.env["MONGODB_URI"] ?? "",
+  },
 } as const;
 
 export type Config = typeof config;
