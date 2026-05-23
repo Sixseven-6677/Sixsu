@@ -38,6 +38,7 @@ import { SessionManager }   from "./facebook/session/SessionManager";
 import { SessionStore }     from "./facebook/session/SessionStore";
 import { ReconnectManager }    from "./facebook/reconnect/ReconnectManager";
 import { ProcessErrorHandler }  from "./errors/handlers/ProcessErrorHandler";
+import { PluginManager } from "./plugins/PluginManager";
 import {
   setCommandPipeline,
   setCommandRegistry,
@@ -113,13 +114,11 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
-  // Auth & Session — must register AuthManager before SessionManager
+  // Auth & Session
   const auth = new AuthManager();
 
-  // Auto-register from appstate file if configured, otherwise from env
-  const appStateFile = config.auth.appStateFile;
-  if (appStateFile) {
-    const { provider } = AuthManager.fromFile("default", appStateFile);
+  if (config.auth.appStateFile) {
+    const { provider } = AuthManager.fromFile("default", config.auth.appStateFile);
     auth.registerAccount("default", provider);
   } else if (process.env[config.auth.appStateEnvKey]) {
     const { provider } = AuthManager.fromEnv("default", config.auth.appStateEnvKey);
@@ -136,7 +135,6 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(sessionManager);
 
-  // ReconnectManager — must come after auth & session are registered
   const reconnect = new ReconnectManager(auth, sessionManager, {
     retry:                 { maxAttempts: 5, baseDelayMs: 2_000, maxDelayMs: 60_000 },
     healthCheckIntervalMs: 30_000,
@@ -161,22 +159,14 @@ async function bootstrap(): Promise<void> {
   loader.watch(commandsDir);
 
   // ─── Middleware Pipeline ──────────────────────────────────────────────────
-  // Order: banned → logging → antispam → cooldown → permissions → typing → execute
   const banStore = new BanStore();
 
   const mwManager = new MiddlewareManager()
-    // 1. Banned check — first gate: blocked users never get further
     .register(createBannedMiddleware({ store: banStore }))
-    // 2. Logging — wraps the rest to measure total duration
     .register(createLoggingMiddleware({ logEntry: true }))
-    // 3. Anti-spam — sliding window rate limit (5 msgs / 10s)
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
-    // 4. Cooldown — global 3s, per-command override via ICommand.cooldownMs
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
-    // 5. Permissions — adminOnly check + blocklist/allowlist + custom check
-    .register(createPermissionsMiddleware({
-      adminIds: config.bot.adminIds,
-    }));
+    .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds }));
 
   log.info(
     `Middleware pipeline: [${mwManager.list().join(" → ")}] → typing → execute`
@@ -199,6 +189,19 @@ async function bootstrap(): Promise<void> {
   setReconnectManager(reconnect);
   setBanStore(banStore);
 
+  // ─── Plugin System ────────────────────────────────────────────────────────
+  // PluginManager is registered last so all core systems are available when
+  // plugins call initialize(). It declares "scheduler" as a dependency so
+  // Bot.start() initialises it after the scheduler is ready.
+  const pluginManager = new PluginManager({
+    commandRegistry: registry,
+    scheduler,
+    pluginsDir:      path.resolve(config.plugins.dir),
+    watch:           config.plugins.watch,
+  });
+  bot.register(pluginManager);
+  // ─────────────────────────────────────────────────────────────────────────
+
   const app = createApp(gateway);
 
   await new Promise<void>((resolve, reject) => {
@@ -215,9 +218,7 @@ async function bootstrap(): Promise<void> {
 
   await bot.start();
 
-  // ─── PM2 ready signal ────────────────────────────────────────────────────
-  // Tells PM2 the app is fully initialised and ready to handle traffic.
-  // Required when ecosystem.config.js sets wait_ready: true.
+  // ─── PM2 ready signal ─────────────────────────────────────────────────────
   if (process.send) {
     process.send("ready");
     log.info("Sent ready signal to PM2.");
