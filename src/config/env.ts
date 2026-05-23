@@ -25,6 +25,11 @@ export const config = {
   database: {
     mongoUri: process.env["MONGODB_URI"] ?? "",
   },
+  logger: {
+    level:      (process.env["LOG_LEVEL"] ?? "info") as "debug" | "info" | "warn" | "error",
+    dir:        process.env["LOG_DIR"] ?? "logs",
+    enableFile: process.env["LOG_FILE"] !== "false",
+  },
 } as const;
 
 export type Config = typeof config;
