@@ -214,6 +214,14 @@ async function bootstrap(): Promise<void> {
   });
 
   await bot.start();
+
+  // ─── PM2 ready signal ────────────────────────────────────────────────────
+  // Tells PM2 the app is fully initialised and ready to handle traffic.
+  // Required when ecosystem.config.js sets wait_ready: true.
+  if (process.send) {
+    process.send("ready");
+    log.info("Sent ready signal to PM2.");
+  }
 }
 
 bootstrap().catch((err: unknown) => {
