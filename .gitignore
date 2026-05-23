@@ -4,3 +4,7 @@ dist/
 *.log
 logs/
 .DS_Store
+
+# PM2
+.pm2/
+pids/
