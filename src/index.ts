@@ -31,6 +31,7 @@ import { createPermissionsMiddleware } from "./middleware/built-in/permissions.m
 import { BanStore, createBannedMiddleware } from "./middleware/built-in/banned.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
+import { createCacheProvider } from "./cache/providers/createProvider";
 import { TaskScheduler } from "./scheduler";
 import { AuthManager }      from "./facebook/auth/AuthManager";
 import { SessionManager }   from "./facebook/session/SessionManager";
@@ -103,7 +104,7 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(errorHandler);
 
-  const cache = new CacheManager();
+  const cache = new CacheManager({ provider: await createCacheProvider() });
   bot.register(cache);
 
   const db = new DatabaseManager();
