@@ -30,6 +30,25 @@ export class MessengerService {
     );
   }
 
+  async sendReaction(
+    messageId: string,
+    recipientId: string,
+    emoji: string
+  ): Promise<void> {
+    await axios.post(
+      GRAPH_API_URL,
+      {
+        recipient: { id: recipientId },
+        sender_action: "react",
+        payload: {
+          message_id: messageId,
+          reaction: emoji,
+        },
+      },
+      { params: { access_token: this.accessToken } }
+    );
+  }
+
   private async send(payload: SendMessagePayload): Promise<void> {
     try {
       await axios.post(GRAPH_API_URL, payload, {
