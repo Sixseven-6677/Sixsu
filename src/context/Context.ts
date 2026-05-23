@@ -1,4 +1,4 @@
-import { MessengerService } from "../services/messenger.service";
+import { ISender } from "../facebook/types/ISender";
 import { ContextUser, ContextThread, ContextMessage } from "./types";
 
 export class Context {
@@ -8,18 +8,18 @@ export class Context {
   readonly args: string[];
   readonly commandName: string;
 
-  private readonly messenger: MessengerService;
+  private readonly sender: ISender;
 
   constructor(
     user: ContextUser,
     thread: ContextThread,
     message: ContextMessage,
-    messenger: MessengerService
+    sender: ISender
   ) {
     this.user = user;
     this.thread = thread;
     this.message = message;
-    this.messenger = messenger;
+    this.sender = sender;
 
     const parts = (message.text ?? "").trim().split(/\s+/).filter(Boolean);
     this.commandName = parts[0]?.toLowerCase() ?? "";
@@ -27,15 +27,15 @@ export class Context {
   }
 
   async reply(text: string): Promise<void> {
-    await this.messenger.sendText(this.user.id, text);
+    await this.sender.sendText(this.user.id, text);
   }
 
   async react(emoji: string): Promise<void> {
-    await this.messenger.sendReaction(this.message.id, this.user.id, emoji);
+    await this.sender.sendReaction(this.message.id, this.user.id, emoji);
   }
 
   async typingOn(): Promise<void> {
-    await this.messenger.sendTypingOn(this.user.id);
+    await this.sender.sendTyping(this.user.id);
   }
 
   hasArgs(): boolean {
