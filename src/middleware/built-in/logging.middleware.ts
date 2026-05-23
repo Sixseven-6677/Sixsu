@@ -21,12 +21,8 @@ export function createLoggingMiddleware(opts: LoggingOptions = {}): IMiddleware 
         log.debug(`→ [${cmdName}] user:${userId} args:[${ctx.args.join(", ")}]`);
       }
 
-      let stopped = false;
       try {
-        let nextCalled = false;
         await next();
-        nextCalled = true;
-        stopped = !nextCalled;
       } catch (err) {
         const ms  = Date.now() - start;
         const msg = err instanceof Error ? err.message : String(err);
@@ -35,11 +31,7 @@ export function createLoggingMiddleware(opts: LoggingOptions = {}): IMiddleware 
       }
 
       const ms = Date.now() - start;
-      if (stopped) {
-        log.debug(`⊘ [${cmdName}] user:${userId} | ${ms}ms | stopped by middleware`);
-      } else {
-        log.info(`✓ [${cmdName}] user:${userId} args:[${ctx.args.join(", ")}] | ${ms}ms`);
-      }
+      log.info(`✓ [${cmdName}] user:${userId} args:[${ctx.args.join(", ")}] | ${ms}ms`);
     },
   };
 }
