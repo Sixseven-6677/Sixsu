@@ -16,10 +16,14 @@ import { createLoggingMiddleware } from "./middleware/built-in/logging.middlewar
 import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middleware";
 import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
+import { DatabaseManager } from "./database/DatabaseManager";
 import { setCommandPipeline } from "./handlers/message.handler";
 
 async function bootstrap(): Promise<void> {
   const bot = new Bot();
+
+  const db = new DatabaseManager();
+  bot.register(db);
 
   const connection = new FacebookConnection();
   const client = new FacebookClient(connection);
