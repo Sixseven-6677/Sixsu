@@ -1,10 +1,20 @@
 import { Context } from "../context/Context";
 import { CommandPipeline } from "../commands/CommandPipeline";
+import { TaskScheduler } from "../scheduler";
 
 let pipeline: CommandPipeline | undefined;
+let scheduler: TaskScheduler | undefined;
 
 export function setCommandPipeline(p: CommandPipeline): void {
   pipeline = p;
+}
+
+export function setTaskScheduler(s: TaskScheduler): void {
+  scheduler = s;
+}
+
+export function getTaskScheduler(): TaskScheduler | undefined {
+  return scheduler;
 }
 
 export async function handleMessage(ctx: Context): Promise<void> {

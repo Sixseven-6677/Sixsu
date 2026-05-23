@@ -30,8 +30,9 @@ import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middlew
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
+import { TaskScheduler } from "./scheduler";
 import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
-import { setCommandPipeline } from "./handlers/message.handler";
+import { setCommandPipeline, setTaskScheduler } from "./handlers/message.handler";
 
 async function bootstrap(): Promise<void> {
   const bot = new Bot();
@@ -48,6 +49,9 @@ async function bootstrap(): Promise<void> {
 
   const db = new DatabaseManager();
   bot.register(db);
+
+  const scheduler = new TaskScheduler();
+  bot.register(scheduler);
 
   const connection = new FacebookConnection();
   const client     = new FacebookClient(connection);
@@ -81,6 +85,7 @@ async function bootstrap(): Promise<void> {
     });
 
   setCommandPipeline(pipeline);
+  setTaskScheduler(scheduler);
 
   const app = createApp(gateway);
 
