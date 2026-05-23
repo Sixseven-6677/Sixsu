@@ -4,10 +4,27 @@
   "description": "Facebook Messenger Bot - Clean TypeScript Architecture",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
+    "start": "node --enable-source-maps dist/index.js",
+    "start:prod": "NODE_ENV=production node --enable-source-maps dist/index.js",
     "dev": "nodemon",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:start:prod": "pm2 start ecosystem.config.js --env production",
+    "pm2:stop": "pm2 stop sixsu-bot",
+    "pm2:restart": "pm2 restart sixsu-bot",
+    "pm2:reload": "pm2 reload ecosystem.config.js --env production",
+    "pm2:delete": "pm2 delete sixsu-bot",
+    "pm2:logs": "pm2 logs sixsu-bot",
+    "pm2:status": "pm2 status",
+    "pm2:save": "pm2 save",
+    "pm2:monit": "pm2 monit",
+    "pm2:startup": "pm2 startup",
+
+    "deploy": "bash deploy.sh",
+    "deploy:restart": "bash deploy.sh --restart"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -29,6 +46,7 @@
     "@types/node": "^20.19.41",
     "@types/uuid": "^10.0.0",
     "nodemon": "^3.1.14",
+    "pm2": "^5.4.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
