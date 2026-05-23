@@ -1,57 +1,44 @@
-import { IMiddleware } from "../types/IMiddleware";
+import { IMiddleware }  from "../types/IMiddleware";
+import { LoggerManager } from "../../logger/LoggerManager";
 
-export interface LogInfo {
-  commandName: string;
-  userId: string;
-  args: string[];
-  durationMs: number;
-}
+const log = LoggerManager.getLogger("Middleware/Log");
 
 export interface LoggingOptions {
-  onSuccess?: (info: LogInfo) => void;
-  onError?: (info: LogInfo, error: unknown) => void;
+  /** Log the command name and user on entry (before execution). Default: false. */
+  logEntry?: boolean;
 }
 
-export function createLoggingMiddleware(
-  options: LoggingOptions = {}
-): IMiddleware {
+export function createLoggingMiddleware(opts: LoggingOptions = {}): IMiddleware {
   return {
-    name: "logging",
+    name:        "logging",
+    description: "Logs command execution time and result",
     handle: async (ctx, command, next) => {
-      const start = Date.now();
       const cmdName = command?.name ?? "(no-command)";
+      const userId  = ctx.user.id;
+      const start   = Date.now();
 
+      if (opts.logEntry) {
+        log.debug(`→ [${cmdName}] user:${userId} args:[${ctx.args.join(", ")}]`);
+      }
+
+      let stopped = false;
       try {
+        let nextCalled = false;
         await next();
-
-        const info: LogInfo = {
-          commandName: cmdName,
-          userId: ctx.user.id,
-          args: ctx.args,
-          durationMs: Date.now() - start,
-        };
-
-        options.onSuccess
-          ? options.onSuccess(info)
-          : console.log(
-              `[Log] "${info.commandName}" | user:${info.userId} | args:[${info.args.join(", ")}] | ${info.durationMs}ms`
-            );
+        nextCalled = true;
+        stopped = !nextCalled;
       } catch (err) {
-        const info: LogInfo = {
-          commandName: cmdName,
-          userId: ctx.user.id,
-          args: ctx.args,
-          durationMs: Date.now() - start,
-        };
-
-        options.onError
-          ? options.onError(info, err)
-          : console.error(
-              `[Log] ERROR "${info.commandName}" | user:${info.userId} | ${info.durationMs}ms`,
-              err
-            );
-
+        const ms  = Date.now() - start;
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`✗ [${cmdName}] user:${userId} | ${ms}ms | error: ${msg}`);
         throw err;
+      }
+
+      const ms = Date.now() - start;
+      if (stopped) {
+        log.debug(`⊘ [${cmdName}] user:${userId} | ${ms}ms | stopped by middleware`);
+      } else {
+        log.info(`✓ [${cmdName}] user:${userId} args:[${ctx.args.join(", ")}] | ${ms}ms`);
       }
     },
   };

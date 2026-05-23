@@ -1,22 +1,37 @@
 import { IMiddleware, MiddlewareFn, toMiddlewareFn } from "./types/IMiddleware";
-import { MiddlewareChain } from "./MiddlewareChain";
+import { MiddlewareChain }  from "./MiddlewareChain";
+import { LoggerManager }    from "../logger/LoggerManager";
+
+const log = LoggerManager.getLogger("MiddlewareManager");
 
 export class MiddlewareManager {
-  private readonly registry = new Map<string, IMiddleware>();
+  /** Ordered list of registered names (insertion order). */
+  private readonly order:    string[] = [];
+  private readonly registry: Map<string, IMiddleware> = new Map();
 
   register(middleware: IMiddleware): this {
     if (this.registry.has(middleware.name)) {
-      throw new Error(
-        `Middleware already registered: "${middleware.name}"`
-      );
+      throw new Error(`Middleware already registered: "${middleware.name}"`);
     }
+
     this.registry.set(middleware.name, middleware);
-    console.log(`[MiddlewareManager] Registered: ${middleware.name}`);
+    this.order.push(middleware.name);
+
+    log.info(
+      `Registered: "${middleware.name}"` +
+      (middleware.description ? ` — ${middleware.description}` : "")
+    );
+
     return this;
   }
 
-  unregister(name: string): void {
+  unregister(name: string): this {
+    if (!this.registry.has(name)) return this;
     this.registry.delete(name);
+    const idx = this.order.indexOf(name);
+    if (idx !== -1) this.order.splice(idx, 1);
+    log.info(`Unregistered: "${name}"`);
+    return this;
   }
 
   get(name: string): IMiddleware {
@@ -33,16 +48,27 @@ export class MiddlewareManager {
     return this.registry.has(name);
   }
 
+  /**
+   * Build a MiddlewareChain from named middlewares.
+   * If no names given, uses all registered in registration order.
+   */
   createChain(...names: string[]): MiddlewareChain {
     const chain = new MiddlewareChain();
-    for (const name of names) {
+    const targets = names.length > 0 ? names : this.order;
+    for (const name of targets) {
       chain.use(this.get(name));
     }
     return chain;
   }
 
+  /** Returns all middlewares in registration order. */
   getAll(): IMiddleware[] {
-    return Array.from(this.registry.values());
+    return this.order.map((n) => this.registry.get(n)!);
+  }
+
+  /** Returns registered names in insertion order. */
+  list(): string[] {
+    return [...this.order];
   }
 
   size(): number {

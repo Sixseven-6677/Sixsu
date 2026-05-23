@@ -28,6 +28,7 @@ import { createLoggingMiddleware } from "./middleware/built-in/logging.middlewar
 import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middleware";
 import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
+import { BanStore, createBannedMiddleware } from "./middleware/built-in/banned.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
 import { TaskScheduler } from "./scheduler";
@@ -41,6 +42,7 @@ import {
   setCommandRegistry,
   setTaskScheduler,
   setReconnectManager,
+  setBanStore,
 } from "./handlers/message.handler";
 import {
   CredentialManager,
@@ -157,13 +159,30 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
+  // ─── Middleware Pipeline ──────────────────────────────────────────────────
+  // Order: banned → logging → antispam → cooldown → permissions → typing → execute
+  const banStore = new BanStore();
+
   const mwManager = new MiddlewareManager()
-    .register(createLoggingMiddleware())
+    // 1. Banned check — first gate: blocked users never get further
+    .register(createBannedMiddleware({ store: banStore }))
+    // 2. Logging — wraps the rest to measure total duration
+    .register(createLoggingMiddleware({ logEntry: true }))
+    // 3. Anti-spam — sliding window rate limit (5 msgs / 10s)
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
+    // 4. Cooldown — global 3s, per-command override via ICommand.cooldownMs
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
-    .register(createPermissionsMiddleware({ blocklist: [] }));
+    // 5. Permissions — adminOnly check + blocklist/allowlist + custom check
+    .register(createPermissionsMiddleware({
+      adminIds: config.bot.adminIds,
+    }));
+
+  log.info(
+    `Middleware pipeline: [${mwManager.list().join(" → ")}] → typing → execute`
+  );
 
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
+    .use(mwManager.fn("banned"))
     .use(mwManager.fn("logging"))
     .use(mwManager.fn("antispam"))
     .use(mwManager.fn("cooldown"))
@@ -177,6 +196,7 @@ async function bootstrap(): Promise<void> {
   setCommandRegistry(registry);
   setTaskScheduler(scheduler);
   setReconnectManager(reconnect);
+  setBanStore(banStore);
 
   const app = createApp(gateway);
 

@@ -3,21 +3,25 @@ import { CommandPipeline }  from "../commands/CommandPipeline";
 import { CommandRegistry }  from "../commands/CommandRegistry";
 import { TaskScheduler }    from "../scheduler";
 import { ReconnectManager } from "../facebook/reconnect/ReconnectManager";
+import { BanStore }         from "../middleware/built-in/banned.middleware";
 
 let pipeline:         CommandPipeline  | undefined;
 let registry:         CommandRegistry  | undefined;
 let scheduler:        TaskScheduler    | undefined;
 let reconnectManager: ReconnectManager | undefined;
+let banStore:         BanStore         | undefined;
 
-export function setCommandPipeline(p: CommandPipeline): void  { pipeline         = p; }
-export function setCommandRegistry(r: CommandRegistry): void  { registry         = r; }
-export function setTaskScheduler(s: TaskScheduler): void      { scheduler        = s; }
+export function setCommandPipeline(p: CommandPipeline): void   { pipeline         = p; }
+export function setCommandRegistry(r: CommandRegistry): void   { registry         = r; }
+export function setTaskScheduler(s: TaskScheduler): void       { scheduler        = s; }
 export function setReconnectManager(r: ReconnectManager): void { reconnectManager = r; }
+export function setBanStore(b: BanStore): void                 { banStore         = b; }
 
 export function getCommandPipeline():  CommandPipeline  | undefined { return pipeline;         }
 export function getCommandRegistry():  CommandRegistry  | undefined { return registry;         }
 export function getTaskScheduler():    TaskScheduler    | undefined { return scheduler;        }
 export function getReconnectManager(): ReconnectManager | undefined { return reconnectManager; }
+export function getBanStore():         BanStore         | undefined { return banStore;         }
 
 export async function handleMessage(ctx: Context): Promise<void> {
   if (ctx.message.isPostback) {

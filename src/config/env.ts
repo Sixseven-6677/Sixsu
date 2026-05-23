@@ -28,6 +28,11 @@ export const config = {
   bot: {
     prefix:      optionalEnv("BOT_PREFIX", "/"),
     commandsDir: optionalEnv("COMMANDS_DIR", "src/commands/definitions"),
+    /** Comma-separated list of Facebook user IDs who are bot admins. */
+    adminIds:    optionalEnv("BOT_ADMIN_IDS", "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 
   database: {
