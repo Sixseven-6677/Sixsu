@@ -1,5 +1,8 @@
 import crypto from "crypto";
 import { config } from "../config/env";
+import { LoggerManager } from "../logger/LoggerManager";
+
+const log = LoggerManager.getLogger("FacebookConnection");
 
 export enum ConnectionState {
   CONNECTED = "CONNECTED",
@@ -48,12 +51,12 @@ export class FacebookConnection {
 
   connect(): void {
     this.state = ConnectionState.CONNECTED;
-    console.log("[FacebookConnection] Connected.");
+    log.info("Connected.");
   }
 
   disconnect(): void {
     this.state = ConnectionState.DISCONNECTED;
-    console.log("[FacebookConnection] Disconnected.");
+    log.info("Disconnected.");
   }
 
   getState(): ConnectionState {
