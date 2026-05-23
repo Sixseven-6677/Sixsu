@@ -31,9 +31,10 @@ import { createPermissionsMiddleware } from "./middleware/built-in/permissions.m
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
 import { TaskScheduler } from "./scheduler";
-import { AuthManager } from "./facebook/auth/AuthManager";
-import { SessionManager } from "./facebook/session/SessionManager";
-import { SessionStore } from "./facebook/session/SessionStore";
+import { AuthManager }      from "./facebook/auth/AuthManager";
+import { SessionManager }   from "./facebook/session/SessionManager";
+import { SessionStore }     from "./facebook/session/SessionStore";
+import { ReconnectManager } from "./facebook/reconnect/ReconnectManager";
 import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
 import { setCommandPipeline, setTaskScheduler } from "./handlers/message.handler";
 
@@ -78,6 +79,15 @@ async function bootstrap(): Promise<void> {
     ttlMs: config.auth.sessionTtlDays * 24 * 60 * 60 * 1000,
   });
   bot.register(sessionManager);
+
+  // ReconnectManager — must come after auth & session are registered
+  const reconnect = new ReconnectManager(auth, sessionManager, {
+    retry:                 { maxAttempts: 5, baseDelayMs: 2_000, maxDelayMs: 60_000 },
+    healthCheckIntervalMs: 30_000,
+    spamWindowMs:          60_000,
+    maxAttemptsPerWindow:  3,
+  });
+  bot.register(reconnect);
 
   const connection = new FacebookConnection();
   const client     = new FacebookClient(connection);
