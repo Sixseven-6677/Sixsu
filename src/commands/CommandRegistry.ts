@@ -1,8 +1,11 @@
-import { ICommand } from "./types/ICommand";
+import { ICommand }      from "./types/ICommand";
+import { LoggerManager } from "../logger/LoggerManager";
+
+const log = LoggerManager.getLogger("CommandRegistry");
 
 export class CommandRegistry {
   private readonly commands = new Map<string, ICommand>();
-  private readonly aliases = new Map<string, string>();
+  private readonly aliases  = new Map<string, string>();
 
   register(command: ICommand): void {
     if (this.commands.has(command.name)) {
@@ -14,17 +17,16 @@ export class CommandRegistry {
     for (const alias of command.aliases ?? []) {
       if (this.aliases.has(alias) || this.commands.has(alias)) {
         throw new Error(
-          `Alias "${alias}" conflicts with an existing command or alias.`
+          `Alias "${alias}" for command "${command.name}" conflicts with an existing command or alias.`
         );
       }
       this.aliases.set(alias, command.name);
     }
 
-    console.log(
-      `[CommandRegistry] Registered: ${command.name}` +
-        (command.aliases?.length
-          ? ` (aliases: ${command.aliases.join(", ")})`
-          : "")
+    log.info(
+      `Registered: ${command.name}` +
+      (command.aliases?.length ? ` (aliases: ${command.aliases.join(", ")})` : "") +
+      (command.category        ? ` [${command.category}]` : "")
     );
   }
 
@@ -37,7 +39,7 @@ export class CommandRegistry {
     }
 
     this.commands.delete(name);
-    console.log(`[CommandRegistry] Unregistered: ${name}`);
+    log.info(`Unregistered: ${name}`);
   }
 
   resolve(nameOrAlias: string): ICommand | undefined {
@@ -45,9 +47,9 @@ export class CommandRegistry {
       return this.commands.get(nameOrAlias);
     }
 
-    const resolvedName = this.aliases.get(nameOrAlias);
-    if (resolvedName) {
-      return this.commands.get(resolvedName);
+    const canonical = this.aliases.get(nameOrAlias);
+    if (canonical) {
+      return this.commands.get(canonical);
     }
 
     return undefined;
@@ -61,6 +63,19 @@ export class CommandRegistry {
     return Array.from(this.commands.values());
   }
 
+  /** Return commands grouped by category (visible only, excludes hidden). */
+  byCategory(): Map<string, ICommand[]> {
+    const map = new Map<string, ICommand[]>();
+    for (const cmd of this.commands.values()) {
+      if (cmd.hidden) continue;
+      const cat = cmd.category ?? "general";
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(cmd);
+    }
+    return map;
+  }
+
+  /** Total number of registered commands (including hidden). */
   size(): number {
     return this.commands.size;
   }
@@ -68,5 +83,6 @@ export class CommandRegistry {
   clear(): void {
     this.commands.clear();
     this.aliases.clear();
+    log.info("Registry cleared.");
   }
 }

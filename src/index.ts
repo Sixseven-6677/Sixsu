@@ -36,7 +36,12 @@ import { SessionManager }   from "./facebook/session/SessionManager";
 import { SessionStore }     from "./facebook/session/SessionStore";
 import { ReconnectManager }    from "./facebook/reconnect/ReconnectManager";
 import { ProcessErrorHandler }  from "./errors/handlers/ProcessErrorHandler";
-import { setCommandPipeline, setTaskScheduler } from "./handlers/message.handler";
+import {
+  setCommandPipeline,
+  setCommandRegistry,
+  setTaskScheduler,
+  setReconnectManager,
+} from "./handlers/message.handler";
 import {
   CredentialManager,
   EnvLoader,
@@ -169,7 +174,9 @@ async function bootstrap(): Promise<void> {
     });
 
   setCommandPipeline(pipeline);
+  setCommandRegistry(registry);
   setTaskScheduler(scheduler);
+  setReconnectManager(reconnect);
 
   const app = createApp(gateway);
 
