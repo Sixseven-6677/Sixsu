@@ -29,10 +29,18 @@ import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middlew
 import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
+import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
 import { setCommandPipeline } from "./handlers/message.handler";
 
 async function bootstrap(): Promise<void> {
   const bot = new Bot();
+
+  const errorHandler = new ProcessErrorHandler();
+  errorHandler.onCriticalError(async () => {
+    log.error("Critical error triggered — initiating emergency shutdown.");
+    await bot.stop();
+  });
+  bot.register(errorHandler);
 
   const db = new DatabaseManager();
   bot.register(db);
