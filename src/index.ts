@@ -31,6 +31,9 @@ import { createPermissionsMiddleware } from "./middleware/built-in/permissions.m
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
 import { TaskScheduler } from "./scheduler";
+import { AuthManager } from "./facebook/auth/AuthManager";
+import { SessionManager } from "./facebook/session/SessionManager";
+import { SessionStore } from "./facebook/session/SessionStore";
 import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
 import { setCommandPipeline, setTaskScheduler } from "./handlers/message.handler";
 
@@ -52,6 +55,29 @@ async function bootstrap(): Promise<void> {
 
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
+
+  // Auth & Session — must register AuthManager before SessionManager
+  const auth = new AuthManager();
+
+  // Auto-register from appstate file if configured, otherwise from env
+  const appStateFile = config.auth.appStateFile;
+  if (appStateFile) {
+    const { provider } = AuthManager.fromFile("default", appStateFile);
+    auth.registerAccount("default", provider);
+  } else if (process.env[config.auth.appStateEnvKey]) {
+    const { provider } = AuthManager.fromEnv("default", config.auth.appStateEnvKey);
+    auth.registerAccount("default", provider);
+  }
+
+  bot.register(auth);
+
+  const sessionStore   = new SessionStore(config.auth.sessionFile, config.auth.sessionSecret);
+  const sessionManager = new SessionManager({
+    store: sessionStore,
+    auth,
+    ttlMs: config.auth.sessionTtlDays * 24 * 60 * 60 * 1000,
+  });
+  bot.register(sessionManager);
 
   const connection = new FacebookConnection();
   const client     = new FacebookClient(connection);
