@@ -32,10 +32,10 @@ jobs:
       - name: Verify dist output
         run: |
           if [ ! -f dist/index.js ]; then
-            echo "ERROR: dist/index.js not found — build failed"
+            echo "ERROR: dist/index.js not found"
             exit 1
           fi
-          echo "Build OK — dist/index.js exists ($(du -sh dist/index.js | cut -f1))"
+          echo "Build OK — $(du -sh dist/index.js | cut -f1)"
 
   deploy:
     name: Deploy to Railway
@@ -48,16 +48,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Railway CLI
-        run: |
-          curl -fsSL https://railway.app/install.sh | sh
-          echo "$HOME/.railway/bin" >> $GITHUB_PATH
+        run: npm install -g @railway/cli
 
       - name: Deploy to Railway
         run: railway up --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-      - name: Deployment complete
-        run: |
-          echo "✅ Deployed to Railway successfully."
-          echo "   Monitor: https://railway.app/dashboard"
+      - name: Done
+        run: echo "✅ Deployed to Railway — https://railway.app/dashboard"
