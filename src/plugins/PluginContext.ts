@@ -35,7 +35,7 @@ export class PluginContext implements IPluginContext {
   readonly pluginName: string;
   readonly logger:     ILogger;
 
-  private readonly disposables: IDisposable[]              = [];
+  private readonly disposables: IDisposable[]            = [];
   private readonly ownedHandlers = new Set<PluginEventHandler>();
   private disposed = false;
 
@@ -145,7 +145,16 @@ export class PluginContext implements IPluginContext {
     this.disposed = true;
 
     for (const d of this.disposables) {
-      try { d.dispose(); } catch { /* ignore */ }
+      try {
+        d.dispose();
+      } catch (err) {
+        // Log disposal errors instead of silently swallowing them.
+        // A failing disposable should not prevent other disposables from running.
+        this.logger.warn(
+          `[${this.pluginName}] Error during resource disposal — continuing cleanup.`,
+          { error: err instanceof Error ? err.message : String(err) }
+        );
+      }
     }
 
     this.disposables.length = 0;
