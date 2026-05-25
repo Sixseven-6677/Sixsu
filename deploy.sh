@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Sixsu Bot — Production Deployment Script
+# Sixsu Bot — Production Deployment Script (VPS / PM2)
+#
+# For Railway deployments, push to the main branch — Railway auto-deploys.
+# This script is for VPS deployments managed via PM2.
 #
 # Usage:
 #   bash deploy.sh              # first-time deploy (production)
@@ -8,11 +11,14 @@
 #   bash deploy.sh --stop       # stop the bot
 #   bash deploy.sh --status     # show PM2 status
 #   bash deploy.sh --logs       # stream live logs
+#   bash deploy.sh --health     # check /health endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 APP_NAME="sixsu-bot"
 ENV="${NODE_ENV:-production}"
+PORT="${PORT:-3000}"
+HEALTH_URL="http://localhost:${PORT}/health"
 
 # ─── Colour helpers ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -31,8 +37,9 @@ for arg in "$@"; do
     --stop)    MODE="stop"    ;;
     --status)  MODE="status"  ;;
     --logs)    MODE="logs"    ;;
+    --health)  MODE="health"  ;;
     --help|-h)
-      sed -n '2,10p' "$0" | sed 's/^# //;s/^#//'
+      sed -n '2,12p' "$0" | sed 's/^# //;s/^#//'
       exit 0
       ;;
     *)
@@ -42,15 +49,58 @@ for arg in "$@"; do
 done
 
 # ─── Guards ───────────────────────────────────────────────────────────────────
-command -v node  >/dev/null 2>&1 || fatal "node is not installed."
-command -v pnpm  >/dev/null 2>&1 || fatal "pnpm is not installed."
-command -v pm2   >/dev/null 2>&1 || fatal "pm2 is not installed. Run: npm install -g pm2"
+command -v node >/dev/null 2>&1 || fatal "node is not installed."
+command -v pnpm >/dev/null 2>&1 || fatal "pnpm is not installed."
+command -v pm2  >/dev/null 2>&1 || fatal "pm2 is not installed. Run: npm install -g pm2"
 
 [[ -f ".env" ]] || warn ".env file not found — make sure env vars are set in the environment."
 [[ -f "ecosystem.config.js" ]] || fatal "ecosystem.config.js not found. Run from the project root."
 
+# ─── Health check helper ──────────────────────────────────────────────────────
+check_health() {
+  local retries=10
+  local wait=3
+  info "Waiting for /health endpoint..."
+  for i in $(seq 1 "$retries"); do
+    if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+      success "Health check passed (attempt $i/$retries)"
+      return 0
+    fi
+    echo -e "  Attempt $i/$retries — retrying in ${wait}s..."
+    sleep "$wait"
+  done
+  warn "Health check did not pass after $retries attempts — check logs."
+  return 1
+}
+
+# ─── Build helper ────────────────────────────────────────────────────────────
+run_build() {
+  info "Installing dependencies..."
+  pnpm install --frozen-lockfile
+
+  info "Running TypeScript typecheck..."
+  pnpm run typecheck
+
+  info "Building TypeScript → dist/..."
+  pnpm run build
+
+  [[ -f "dist/index.js" ]] || fatal "Build failed: dist/index.js not found."
+  success "Build successful."
+}
+
 # ─── Actions ──────────────────────────────────────────────────────────────────
 case "$MODE" in
+
+  # ── health ────────────────────────────────────────────────────────────────
+  health)
+    if curl -sf "$HEALTH_URL"; then
+      echo ""
+      success "Bot is healthy at ${HEALTH_URL}"
+    else
+      fatal "Health check failed — bot may not be running."
+    fi
+    exit 0
+    ;;
 
   # ── stop ──────────────────────────────────────────────────────────────────
   stop)
@@ -71,13 +121,12 @@ case "$MODE" in
     exec pm2 logs "$APP_NAME"
     ;;
 
-  # ── restart (graceful reload) ───────────────────────────────────────────────
+  # ── restart (graceful reload, zero downtime) ────────────────────────────────
   restart)
-    info "Rebuilding..."
-    pnpm run build
+    run_build
 
     if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-      info "Reloading $APP_NAME (graceful)..."
+      info "Reloading $APP_NAME (graceful — zero downtime)..."
       pm2 reload ecosystem.config.js --env "$ENV"
     else
       warn "$APP_NAME not found in PM2 — starting fresh."
@@ -85,17 +134,14 @@ case "$MODE" in
     fi
 
     pm2 save
+    check_health || true
     success "Reloaded successfully."
     exit 0
     ;;
 
   # ── start (first-time deploy) ────────────────────────────────────────────
   start)
-    info "Installing dependencies..."
-    pnpm install --frozen-lockfile
-
-    info "Building TypeScript..."
-    pnpm run build
+    run_build
 
     info "Creating logs/ directory..."
     mkdir -p logs
@@ -106,14 +152,17 @@ case "$MODE" in
       exit 0
     fi
 
-    info "Starting $APP_NAME in $ENV mode..."
+    info "Starting $APP_NAME in $ENV mode (PORT=$PORT)..."
     pm2 start ecosystem.config.js --env "$ENV"
 
     info "Saving PM2 process list..."
     pm2 save
 
+    check_health || true
+
     echo ""
     success "${BOLD}Deployment complete!${RESET}"
+    echo -e "  ${CYAN}Health:${RESET} bash deploy.sh --health"
     echo -e "  ${CYAN}Logs:${RESET}   pm2 logs $APP_NAME"
     echo -e "  ${CYAN}Status:${RESET} pm2 status"
     echo -e "  ${CYAN}Stop:${RESET}   bash deploy.sh --stop"
