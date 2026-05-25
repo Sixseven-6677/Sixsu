@@ -1,29 +1,37 @@
-import { Request, Response } from "express";
-import { WebhookBody } from "../types";
-import { FacebookConnection } from "./FacebookConnection";
-import { FacebookSender } from "./FacebookSender";
+import { Request, Response }       from "express";
+import { WebhookBody }             from "../types";
+import { FacebookConnection }      from "./FacebookConnection";
+import { FacebookSender }          from "./FacebookSender";
 import { FacebookEventNormalizer } from "./FacebookEventNormalizer";
-import { ContextBuilder } from "../context/ContextBuilder";
-import { Context } from "../context/Context";
-import { LoggerManager } from "../logger/LoggerManager";
+import { ContextBuilder }          from "../context/ContextBuilder";
+import { Context }                 from "../context/Context";
+import { LoggerManager }           from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("FacebookGateway");
 
 export type MessageHandler = (ctx: Context) => Promise<void>;
 
 export class FacebookGateway {
-  private readonly connection:    FacebookConnection;
-  private readonly normalizer:    FacebookEventNormalizer;
+  private readonly connection:     FacebookConnection;
+  private readonly normalizer:     FacebookEventNormalizer;
   private readonly contextBuilder: ContextBuilder;
 
   constructor(
     connection: FacebookConnection,
-    sender: FacebookSender,
+    sender:     FacebookSender,
     normalizer: FacebookEventNormalizer
   ) {
     this.connection     = connection;
     this.normalizer     = normalizer;
     this.contextBuilder = new ContextBuilder(sender);
+  }
+
+  /**
+   * Returns the ContextBuilder so that bootstrap can inject services
+   * (e.g. UserService) after construction.
+   */
+  getContextBuilder(): ContextBuilder {
+    return this.contextBuilder;
   }
 
   handleVerification(req: Request, res: Response): void {
@@ -57,11 +65,14 @@ export class FacebookGateway {
           continue;
         }
 
-        const ctx = this.contextBuilder.build(event);
-
-        handler(ctx).catch((err: unknown) => {
-          log.error("Unhandled error in message handler.", err);
-        });
+        // Build context asynchronously (includes UserService DB/cache lookup),
+        // then dispatch to the handler — errors are logged and never surface to Facebook.
+        this.contextBuilder
+          .build(event)
+          .then((ctx) => handler(ctx))
+          .catch((err: unknown) => {
+            log.error("Unhandled error in message handler.", err);
+          });
       }
     }
   }
