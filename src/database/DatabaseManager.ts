@@ -14,7 +14,8 @@ export class DatabaseManager implements ISystem {
     const uri = config.database.mongoUri;
 
     if (!uri) {
-      throw new Error("MONGODB_URI is not set in environment variables.");
+      log.warn("MONGODB_URI is not set — skipping database connection. Features requiring DB will be unavailable.");
+      return;
     }
 
     await mongoose.connect(uri, {
