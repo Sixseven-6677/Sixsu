@@ -12,86 +12,70 @@ LoggerManager.configure({
 
 const log = LoggerManager.getLogger("Boot");
 
-import { createApp } from "./app";
-import { Bot } from "./core/Bot";
-import { FacebookConnection } from "./facebook/FacebookConnection";
-import { FacebookClient } from "./facebook/FacebookClient";
-import { FacebookSender } from "./facebook/FacebookSender";
-import { FacebookEventNormalizer } from "./facebook/FacebookEventNormalizer";
-import { FacebookGateway } from "./facebook/FacebookGateway";
-import { CommandRegistry } from "./commands/CommandRegistry";
-import { CommandLoader } from "./commands/CommandLoader";
-import { CommandPipeline } from "./commands/CommandPipeline";
-import { typingMiddleware } from "./commands/middleware/typing.middleware";
-import { MiddlewareManager } from "./middleware/MiddlewareManager";
-import { createLoggingMiddleware } from "./middleware/built-in/logging.middleware";
-import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middleware";
-import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
+import { createApp }                   from "./app";
+import { Bot }                         from "./core/Bot";
+import { FacebookConnection }          from "./facebook/FacebookConnection";
+import { FacebookClient }              from "./facebook/FacebookClient";
+import { FacebookSender }              from "./facebook/FacebookSender";
+import { CookieHttpClient }            from "./facebook/cookie/CookieHttpClient";
+import { CookieSender }                from "./facebook/cookie/CookieSender";
+import { ISender }                     from "./facebook/types/ISender";
+import { FacebookEventNormalizer }     from "./facebook/FacebookEventNormalizer";
+import { FacebookGateway }             from "./facebook/FacebookGateway";
+import { CommandRegistry }             from "./commands/CommandRegistry";
+import { CommandLoader }               from "./commands/CommandLoader";
+import { CommandPipeline }             from "./commands/CommandPipeline";
+import { typingMiddleware }            from "./commands/middleware/typing.middleware";
+import { MiddlewareManager }           from "./middleware/MiddlewareManager";
+import { createLoggingMiddleware }     from "./middleware/built-in/logging.middleware";
+import { createCooldownMiddleware }    from "./middleware/built-in/cooldown.middleware";
+import { createAntiSpamMiddleware }    from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
 import {
-  BanStore,
-  BanEntry,
-  createBannedMiddleware,
+  BanStore, BanEntry, createBannedMiddleware,
 } from "./middleware/built-in/banned.middleware";
-import { DatabaseManager } from "./database/DatabaseManager";
-import { UserRepository }  from "./database/repositories/user.repository";
-import { CacheManager } from "./cache/CacheManager";
+import { DatabaseManager }   from "./database/DatabaseManager";
+import { UserRepository }    from "./database/repositories/user.repository";
+import { CacheManager }      from "./cache/CacheManager";
 import { createCacheProvider } from "./cache/providers/createProvider";
-import { UserService }     from "./users/UserService";
-import { TaskScheduler } from "./scheduler";
-import { AuthManager }      from "./facebook/auth/AuthManager";
-import { SessionManager }   from "./facebook/session/SessionManager";
-import { SessionStore }     from "./facebook/session/SessionStore";
-import { ReconnectManager }    from "./facebook/reconnect/ReconnectManager";
-import { ProcessErrorHandler }  from "./errors/handlers/ProcessErrorHandler";
-import { PluginManager } from "./plugins/PluginManager";
+import { UserService }       from "./users/UserService";
+import { TaskScheduler }     from "./scheduler";
+import { AuthManager }       from "./facebook/auth/AuthManager";
+import { SessionManager }    from "./facebook/session/SessionManager";
+import { SessionStore }      from "./facebook/session/SessionStore";
+import { ReconnectManager }  from "./facebook/reconnect/ReconnectManager";
+import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
+import { PluginManager }     from "./plugins/PluginManager";
 import {
-  setCommandPipeline,
-  setCommandRegistry,
-  setTaskScheduler,
-  setReconnectManager,
-  setBanStore,
-  setUserService,
+  setCommandPipeline, setCommandRegistry, setTaskScheduler,
+  setReconnectManager, setBanStore, setUserService,
 } from "./handlers/message.handler";
 import {
-  CredentialManager,
-  EnvLoader,
-  EncryptedFileLoader,
-  StartupValidator,
-  EnvPresenceCheck,
-  CredentialLoadCheck,
-  SessionIntegrityCheck,
-  CheckSeverity,
+  CredentialManager, EnvLoader, EncryptedFileLoader,
+  StartupValidator, EnvPresenceCheck, CredentialLoadCheck,
+  SessionIntegrityCheck, CheckSeverity,
 } from "./security";
 
-/**
- * Produces a user-facing message when a blocked user tries to interact.
- * Differentiates ban / mute / kick by reason prefix set by ModerationService.
- */
 function buildBanMessage(entry: BanEntry): string {
   const expiry = entry.expiresAt
     ? ` ينتهي: ${entry.expiresAt.toLocaleString("ar-SA")}.`
     : "";
-
-  if (entry.reason?.startsWith("[MUTED]")) {
-    return `🔇 تم كتمك من التفاعل مع البوت.${expiry}`;
-  }
-  if (entry.reason?.startsWith("[KICKED]")) {
-    return `👢 تم طردك مؤقتاً.${expiry}`;
-  }
-
+  if (entry.reason?.startsWith("[MUTED]")) return `🔇 تم كتمك من التفاعل مع البوت.${expiry}`;
+  if (entry.reason?.startsWith("[KICKED]")) return `👢 تم طردك مؤقتاً.${expiry}`;
   const reason = entry.reason ? ` السبب: ${entry.reason}.` : "";
   const durStr = entry.expiresAt ? expiry : " الحظر دائم.";
   return `🚫 أنت محظور من استخدام البوت.${reason}${durStr}`;
 }
 
 async function bootstrap(): Promise<void> {
-  // ── Security: Startup Validation ─────────────────────────────────────────
+
+  // ── Startup Validation ────────────────────────────────────────────────────
   const credManager = new CredentialManager({
     loaders: [
       new EnvLoader({
-        required: ["FB_PAGE_ACCESS_TOKEN", "FB_APP_SECRET", "FB_VERIFY_TOKEN"],
-        optional: ["SESSION_SECRET"],
+        // FB_PAGE_ACCESS_TOKEN is no longer required — AppState cookies are used instead.
+        required: ["FB_APP_SECRET", "FB_VERIFY_TOKEN"],
+        optional: ["SESSION_SECRET", "FB_PAGE_ACCESS_TOKEN"],
       }),
       ...(config.auth.appStateFile
         ? [new EncryptedFileLoader({
@@ -104,7 +88,7 @@ async function bootstrap(): Promise<void> {
 
   const validator = new StartupValidator()
     .add(new EnvPresenceCheck({
-      required:  ["FB_PAGE_ACCESS_TOKEN", "FB_APP_SECRET", "FB_VERIFY_TOKEN", "SESSION_SECRET"],
+      required:  ["FB_APP_SECRET", "FB_VERIFY_TOKEN", "SESSION_SECRET"],
       severity:  CheckSeverity.CRITICAL,
     }))
     .add(new CredentialLoadCheck(credManager))
@@ -142,6 +126,7 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
+  // ── Auth / Session system ────────────────────────────────────────────────
   const auth = new AuthManager();
 
   if (config.auth.appStateFile) {
@@ -170,20 +155,55 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(reconnect);
 
-  const connection = new FacebookConnection();
-  const client     = new FacebookClient(connection);
-  const sender     = new FacebookSender(client);
-  const normalizer = new FacebookEventNormalizer();
-  const gateway    = new FacebookGateway(connection, sender, normalizer);
+  // ── Sender selection: cookies first, page token as fallback ──────────────
+  //
+  //   Mode A — Cookie / AppState (preferred, no page token needed):
+  //     Set FB_APPSTATE or FB_APPSTATE_FILE → Bot sends via cookie auth.
+  //
+  //   Mode B — Graph API fallback (requires FB_PAGE_ACCESS_TOKEN):
+  //     Set FB_PAGE_ACCESS_TOKEN → Bot sends via official Messenger Platform API.
+  //
+  let sender: ISender;
+  let cookieClient: CookieHttpClient | null = null;
 
+  const credentials = auth.getCredentials("default");
+
+  if (credentials) {
+    // ── Mode A: Cookie-based sender ────────────────────────────────────────
+    cookieClient = new CookieHttpClient(credentials.appState);
+    sender       = new CookieSender(cookieClient);
+    log.info("Sender: CookieSender active (AppState cookies).", {
+      userId: cookieClient.getUserId(),
+    });
+  } else if (config.facebook.pageAccessToken) {
+    // ── Mode B: Graph API sender (legacy) ──────────────────────────────────
+    const connection = new FacebookConnection();
+    const client     = new FacebookClient(connection);
+    sender           = new FacebookSender(client);
+    connection.connect();
+    log.info("Sender: FacebookSender active (Graph API / Page Access Token).");
+  } else {
+    log.error(
+      "No sender available. Set either:" +
+      "\n  • FB_APPSTATE (base64 cookie export) — recommended" +
+      "\n  • FB_APPSTATE_FILE (path to appState JSON file)" +
+      "\n  • FB_PAGE_ACCESS_TOKEN (Graph API fallback)"
+    );
+    process.exit(1);
+  }
+
+  const normalizer = new FacebookEventNormalizer();
+  const connection  = new FacebookConnection();
+  const gateway    = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
+  // ─────────────────────────────────────────────────────────────────────────
 
   // ── User System ───────────────────────────────────────────────────────────
   const userRepo = new UserRepository();
   const userSvc  = new UserService(userRepo, cache.store("users"));
   gateway.getContextBuilder().setUserService(userSvc);
   setUserService(userSvc);
-  log.info("UserService: wired into ContextBuilder.");
+  log.info("UserService wired into ContextBuilder.");
   // ─────────────────────────────────────────────────────────────────────────
 
   const registry    = new CommandRegistry();
@@ -193,7 +213,7 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
-  // ── BanStore + Middleware Pipeline ────────────────────────────────────────
+  // ── Middleware Pipeline ───────────────────────────────────────────────────
   const banStore = new BanStore();
 
   const mwManager = new MiddlewareManager()
@@ -221,6 +241,7 @@ async function bootstrap(): Promise<void> {
   setTaskScheduler(scheduler);
   setReconnectManager(reconnect);
   setBanStore(banStore);
+  // ─────────────────────────────────────────────────────────────────────────
 
   // ── Plugin System + Core Services ────────────────────────────────────────
   const pluginManager = new PluginManager({
@@ -231,12 +252,20 @@ async function bootstrap(): Promise<void> {
   });
 
   const svcReg = pluginManager.getServiceRegistry();
-  // Core services (consumed by plugins)
-  svcReg.provide("command-registry",  registry,                        "core");
-  svcReg.provide("fb-access-token",   config.facebook.pageAccessToken, "core");
-  svcReg.provide("facebook-client",   client,                          "core");
-  svcReg.provide("ban-store",         banStore,                        "core");
-  svcReg.provide("user-service",      userSvc,                         "core");
+  svcReg.provide("command-registry", registry,  "core");
+  svcReg.provide("facebook-sender",  sender,    "core");
+  svcReg.provide("ban-store",        banStore,  "core");
+  svcReg.provide("user-service",     userSvc,   "core");
+
+  // Provide cookie client if available (plugins can use it for advanced FB ops)
+  if (cookieClient) {
+    svcReg.provide("fb-cookie-client", cookieClient, "core");
+    log.info("Core service registered: fb-cookie-client.");
+  } else if (config.facebook.pageAccessToken) {
+    // Legacy: expose page token for plugins that still reference it
+    svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
+    log.info("Core service registered: fb-access-token (Graph API mode).");
+  }
 
   bot.register(pluginManager);
   // ─────────────────────────────────────────────────────────────────────────
