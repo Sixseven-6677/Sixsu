@@ -12,23 +12,31 @@ export class DelayedTask implements ITask {
 
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly options: DelayedTaskOptions;
+  private readonly onComplete: (() => void) | undefined;
 
-  constructor(options: DelayedTaskOptions) {
-    this.id = options.id ?? uuidv4();
-    this.name = options.name;
-    this.options = options;
+  /**
+   * @param options     Task configuration.
+   * @param onComplete  Called once the delayed task finishes executing naturally
+   *                    (not via cancel). Used by TaskScheduler to evict the task
+   *                    from its registry, preventing memory accumulation.
+   */
+  constructor(options: DelayedTaskOptions, onComplete?: () => void) {
+    this.id         = options.id ?? uuidv4();
+    this.name       = options.name;
+    this.options    = options;
+    this.onComplete = onComplete;
 
     const now = new Date();
     this.meta = {
-      id: this.id,
-      name: this.name,
-      status: "idle",
-      createdAt: now,
-      lastRunAt: null,
-      nextRunAt: new Date(Date.now() + options.delayMs),
-      runCount: 0,
+      id:         this.id,
+      name:       this.name,
+      status:     "idle",
+      createdAt:  now,
+      lastRunAt:  null,
+      nextRunAt:  new Date(Date.now() + options.delayMs),
+      runCount:   0,
       errorCount: 0,
-      lastError: null,
+      lastError:  null,
     };
   }
 
@@ -43,6 +51,8 @@ export class DelayedTask implements ITask {
 
       if (this.meta.status !== "cancelled") {
         this.meta.status = "completed";
+        // Notify scheduler so it can remove this task from its registry.
+        this.onComplete?.();
       }
 
       this.timer = null;
@@ -55,7 +65,7 @@ export class DelayedTask implements ITask {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    this.meta.status = "cancelled";
+    this.meta.status    = "cancelled";
     this.meta.nextRunAt = null;
     log.info(`Delayed task "${this.name}" [${this.id}] cancelled.`);
   }
