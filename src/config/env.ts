@@ -3,14 +3,6 @@ import path   from "path";
 
 dotenv.config();
 
-function requireEnv(key: string): string {
-  const value = process.env[key];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${key}`);
-  }
-  return value;
-}
-
 function optionalEnv(key: string, fallback = ""): string {
   return process.env[key] ?? fallback;
 }
@@ -32,13 +24,9 @@ export const config = {
   nodeEnv: process.env["NODE_ENV"] ?? "development",
 
   facebook: {
-    /**
-     * Page Access Token — used ONLY when the bot runs in Graph API mode.
-     * Leave empty to use cookie / AppState mode instead (recommended).
-     */
     pageAccessToken: optionalEnv("FB_PAGE_ACCESS_TOKEN"),
-    verifyToken:     requireEnv("FB_VERIFY_TOKEN"),
-    appSecret:       requireEnv("FB_APP_SECRET"),
+    verifyToken:     optionalEnv("FB_VERIFY_TOKEN", ""),
+    appSecret:       optionalEnv("FB_APP_SECRET", ""),
   },
 
   bot: {
