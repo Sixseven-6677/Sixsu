@@ -1,8 +1,8 @@
 import { ICacheProvider, CacheSetOptions } from "./types/ICache";
 
 export class CacheStore {
-  private readonly provider: ICacheProvider;
-  private readonly ns:       string;
+  private provider: ICacheProvider;
+  private readonly ns: string;
 
   constructor(provider: ICacheProvider, namespace: string) {
     this.provider = provider;
@@ -11,6 +11,15 @@ export class CacheStore {
 
   get namespace(): string {
     return this.ns.slice(0, -1);
+  }
+
+  /**
+   * Swap the underlying provider.
+   * Called by CacheManager.useProvider() to propagate a provider change to
+   * all existing CacheStore instances without breaking external references.
+   */
+  setProvider(provider: ICacheProvider): void {
+    this.provider = provider;
   }
 
   async get<T>(key: string): Promise<T | null> {
