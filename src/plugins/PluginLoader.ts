@@ -15,11 +15,27 @@ const isTsNode = Boolean(
 
 const FILE_EXT = isTsNode ? ".ts" : ".js";
 
+/**
+ * A file is considered a plugin entry-point when it matches either pattern:
+ *   index.ts / index.js          — standard directory-plugin (recommended)
+ *   *.plugin.ts / *.plugin.js    — flat single-file plugin
+ *
+ * All other files inside the plugin directory (commands, services, models …)
+ * are intentionally skipped to avoid noisy "no valid plugin export" warnings.
+ */
+function isPluginFile(name: string): boolean {
+  const bare = FILE_EXT === ".ts" ? ".ts" : ".js";
+  return (
+    name === `index${bare}` ||
+    name.endsWith(`.plugin${bare}`)
+  );
+}
+
 export type OnPluginLoad   = (plugin: IPlugin, filePath: string) => Promise<void>;
 export type OnPluginUnload = (name: string) => Promise<void>;
 
 /**
- * Discovers, loads, and hot-reloads plugin files from a directory.
+ * Discovers, loads, and hot-reloads plugin entry-point files from a directory.
  *
  * Supports two export styles:
  *   export default class MyPlugin implements IPlugin { ... }   (class — instantiated)
@@ -58,10 +74,15 @@ export class PluginLoader {
   }
 
   watch(directory: string): void {
-    const absDir  = path.resolve(directory);
-    const pattern = path.join(absDir, "**", `*${FILE_EXT}`);
+    const absDir = path.resolve(directory);
 
-    this.watcher = chokidar.watch(pattern, {
+    // Watch only plugin entry-points, not every file in the directory.
+    const patterns = [
+      path.join(absDir, "**", `index${FILE_EXT}`),
+      path.join(absDir, "**", `*.plugin${FILE_EXT}`),
+    ];
+
+    this.watcher = chokidar.watch(patterns, {
       ignoreInitial: true,
       persistent:    true,
     });
@@ -162,6 +183,13 @@ export class PluginLoader {
     }
   }
 
+  /**
+   * Recursively collect only plugin entry-point files:
+   *   index.ts / index.js         — directory-based plugins
+   *   *.plugin.ts / *.plugin.js   — flat single-file plugins
+   *
+   * Files prefixed with "_" are always skipped (e.g. _template.plugin.ts).
+   */
   private collectFiles(dir: string): string[] {
     const result: string[] = [];
 
@@ -179,8 +207,8 @@ export class PluginLoader {
         result.push(...this.collectFiles(full));
       } else if (
         entry.isFile()                    &&
-        entry.name.endsWith(FILE_EXT)     &&
-        !entry.name.startsWith("_")
+        !entry.name.startsWith("_")       &&
+        isPluginFile(entry.name)
       ) {
         result.push(full);
       }
