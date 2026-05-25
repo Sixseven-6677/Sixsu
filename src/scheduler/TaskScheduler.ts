@@ -28,14 +28,14 @@ export class TaskScheduler implements ISystem {
   }
 
   delay(options: DelayedTaskOptions): DelayedTask {
-    const task = new DelayedTask(options);
+    const task = new DelayedTask(options, () => this.evict(task.id));
     this.register(task);
     task.start();
     return task;
   }
 
   recur(options: RecurringTaskOptions): RecurringTask {
-    const task = new RecurringTask(options);
+    const task = new RecurringTask(options, () => this.evict(task.id));
     this.register(task);
     task.start();
     return task;
@@ -67,10 +67,20 @@ export class TaskScheduler implements ISystem {
   stats(): { total: number; active: number; failed: number } {
     const all = this.list();
     return {
-      total: all.length,
+      total:  all.length,
       active: all.filter((m) => m.status === "idle" || m.status === "running").length,
       failed: all.filter((m) => m.status === "failed").length,
     };
+  }
+
+  /**
+   * Called by tasks when they complete naturally (maxRuns reached / delayed task done).
+   * Removes the task from the registry so completed tasks don't accumulate.
+   */
+  private evict(id: string): void {
+    if (this.tasks.delete(id)) {
+      log.info(`Task [${id}] completed and evicted from registry.`);
+    }
   }
 
   private register(task: ITask): void {
