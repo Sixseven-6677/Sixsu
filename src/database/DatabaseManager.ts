@@ -25,14 +25,24 @@ export class DatabaseManager implements ISystem {
     this.connection = mongoose.connection;
 
     this.connection.on("disconnected", () => {
-      log.warn("MongoDB disconnected.");
+      log.warn(
+        "MongoDB disconnected. Mongoose will attempt automatic reconnection. " +
+        "If the bot is not in shutdown, check your network and MongoDB host."
+      );
+    });
+
+    this.connection.on("reconnected", () => {
+      log.info("MongoDB reconnected successfully.");
     });
 
     this.connection.on("error", (err: Error) => {
-      log.error("Connection error.", err);
+      log.error("MongoDB connection error.", err);
     });
 
-    log.info("Connected to MongoDB.");
+    log.info("Connected to MongoDB.", {
+      host: mongoose.connection.host,
+      name: mongoose.connection.name,
+    });
   }
 
   async destroy(): Promise<void> {
