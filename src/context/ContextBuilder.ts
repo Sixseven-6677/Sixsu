@@ -45,8 +45,7 @@ export class ContextBuilder {
    * Builds a Context asynchronously.
    *
    * When UserService is available the user record is fetched/created from the
-   * database (or served from cache) so ctx.user is fully populated with:
-   *   - role, messageCount, lastSeen, createdAt, preferences, isNew
+   * database (or served from cache) so ctx.user is fully populated.
    *
    * On any error the builder falls back to a minimal user object so the
    * message is never silently dropped.
@@ -56,14 +55,27 @@ export class ContextBuilder {
       throw new Error("Cannot build context for unknown event type.");
     }
 
+    const buildStart = Date.now();
+    log.debug("Building context.", {
+      senderId:  event.senderId,
+      eventType: event.type,
+      hasUserService: Boolean(this.userService),
+    });
+
     const thread:  ContextThread  = { id: event.senderId, pageId: event.pageId };
     const message: ContextMessage = this.buildMessage(event);
 
-    let user: ContextUser = FALLBACK_USER(event.senderId);
+    // ── User resolution ───────────────────────────────────────────────────
+    let user:   ContextUser = FALLBACK_USER(event.senderId);
+    let source: "db" | "cache" | "fallback" = "fallback";
 
     if (this.userService) {
       try {
+        log.debug("UserService.findOrCreate — start.", { fbId: event.senderId });
+        const t0     = Date.now();
         const record = await this.userService.findOrCreate(event.senderId);
+        const lookupMs = Date.now() - t0;
+
         user = {
           id:           record.fbId,
           name:         record.name,
@@ -74,13 +86,36 @@ export class ContextBuilder {
           preferences:  record.preferences,
           isNew:        record.isNew,
         };
+        source = "db";
+
+        log.debug("UserService.findOrCreate — done.", {
+          fbId:         event.senderId,
+          role:         user.role,
+          isNew:        user.isNew,
+          messageCount: user.messageCount,
+          lookupMs,
+        });
       } catch (err) {
-        log.warn("ContextBuilder: UserService lookup failed — using fallback user.", {
+        source = "fallback";
+        log.warn("UserService lookup failed — using fallback user.", {
           fbId:  event.senderId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    } else {
+      log.debug("No UserService injected — using fallback user.", {
+        fbId: event.senderId,
+      });
     }
+
+    const totalMs = Date.now() - buildStart;
+    log.debug("Context ready.", {
+      senderId: event.senderId,
+      userId:   user.id,
+      role:     user.role,
+      source,
+      totalMs,
+    });
 
     return new Context(user, thread, message, this.sender);
   }
