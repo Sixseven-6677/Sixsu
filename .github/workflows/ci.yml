@@ -64,7 +64,7 @@ jobs:
 
       - name: Deploy to Railway
         if: steps.check_token.outputs.has_token == 'true'
-        run: railway up --detach
+        run: railway up --detach --service Sixsu
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
