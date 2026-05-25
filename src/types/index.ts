@@ -4,6 +4,9 @@ export interface MessagingEntry {
   timestamp: number;
   message?: IncomingMessage;
   postback?: Postback;
+  thread_action?: "added_participants" | "removed_participants";
+  added_participants?: Array<{ id: string }>;
+  removed_participants?: Array<{ id: string }>;
 }
 
 export interface IncomingMessage {

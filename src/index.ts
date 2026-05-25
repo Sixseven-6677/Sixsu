@@ -51,6 +51,9 @@ import {
   setReconnectManager, setBanStore, setUserService,
 } from "./handlers/message.handler";
 import {
+  setGroupSender, handleMemberJoined, handleMemberLeft,
+} from "./handlers/group.handler";
+import {
   CredentialManager, EnvLoader, EncryptedFileLoader,
   StartupValidator, EnvPresenceCheck, CredentialLoadCheck,
   SessionIntegrityCheck, CheckSeverity,
@@ -192,6 +195,9 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
+  setGroupSender(sender);
+  log.info("GroupHandler wired with sender.");
+
   const normalizer = new FacebookEventNormalizer();
   const connection  = new FacebookConnection();
   const gateway    = new FacebookGateway(connection, sender, normalizer);
@@ -270,7 +276,10 @@ async function bootstrap(): Promise<void> {
   bot.register(pluginManager);
   // ─────────────────────────────────────────────────────────────────────────
 
-  const app = createApp(gateway);
+  const app = createApp(gateway, {
+    onMemberJoined: handleMemberJoined,
+    onMemberLeft:   handleMemberLeft,
+  });
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(config.port, () => {

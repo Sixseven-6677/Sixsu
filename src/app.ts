@@ -1,7 +1,8 @@
 import crypto                         from "crypto";
 import express, { Application,
   Request, Response, NextFunction }   from "express";
-import { FacebookGateway }            from "./facebook/FacebookGateway";
+import { FacebookGateway,
+         GroupHandlers }              from "./facebook/FacebookGateway";
 import { createWebhookRouter }        from "./routes/webhook.route";
 import { httpErrorHandler,
          notFoundHandler }            from "./errors/handlers/HttpErrorHandler";
@@ -59,7 +60,7 @@ function verifyFacebookSignature(
   next();
 }
 
-export function createApp(gateway: FacebookGateway): Application {
+export function createApp(gateway: FacebookGateway, groupHandlers: GroupHandlers = {}): Application {
   const app = express();
 
   // ── Body parsing ──────────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ export function createApp(gateway: FacebookGateway): Application {
 
   // ── Webhook ────────────────────────────────────────────────────────────────
   // Apply signature verification only in production to keep local dev ergonomic.
-  const webhookRouter = createWebhookRouter(gateway);
+  const webhookRouter = createWebhookRouter(gateway, groupHandlers);
 
   if (config.nodeEnv === "production") {
     app.use("/webhook", verifyFacebookSignature, webhookRouter);

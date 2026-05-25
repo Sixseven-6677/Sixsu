@@ -5,11 +5,19 @@ import { FacebookSender }          from "./FacebookSender";
 import { FacebookEventNormalizer } from "./FacebookEventNormalizer";
 import { ContextBuilder }          from "../context/ContextBuilder";
 import { Context }                 from "../context/Context";
+import { FBMemberJoinedEvent, FBMemberLeftEvent } from "./types/events";
 import { LoggerManager }           from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("FacebookGateway");
 
-export type MessageHandler = (ctx: Context) => Promise<void>;
+export type MessageHandler      = (ctx: Context) => Promise<void>;
+export type MemberJoinedHandler = (event: FBMemberJoinedEvent) => Promise<void>;
+export type MemberLeftHandler   = (event: FBMemberLeftEvent)   => Promise<void>;
+
+export interface GroupHandlers {
+  onMemberJoined?: MemberJoinedHandler;
+  onMemberLeft?:   MemberLeftHandler;
+}
 
 export class FacebookGateway {
   private readonly connection:     FacebookConnection;
@@ -53,7 +61,11 @@ export class FacebookGateway {
     res.status(403).json({ error: "Forbidden" });
   }
 
-  processWebhookBody(body: WebhookBody, handler: MessageHandler): void {
+  processWebhookBody(
+    body:          WebhookBody,
+    handler:       MessageHandler,
+    groupHandlers: GroupHandlers = {},
+  ): void {
     if (body.object !== "page") return;
 
     for (const entry of body.entry) {
@@ -78,10 +90,37 @@ export class FacebookGateway {
                 text:        event.text?.slice(0, 80),
                 attachments: event.attachments.length,
               }
-            : { payload: event.payload?.slice(0, 80) }),
+            : event.type === "postback"
+              ? { payload: event.payload?.slice(0, 80) }
+              : event.type === "member_joined"
+                ? { addedByUserId: event.addedByUserId, members: event.members }
+                : event.type === "member_left"
+                  ? { members: event.members }
+                  : {}),
         });
 
-        // ── [3] Build context (async) then dispatch to handler ─────────────
+        // ── [3a] Group member events — dispatch directly (no context build) ─
+        if (event.type === "member_joined" && groupHandlers.onMemberJoined) {
+          groupHandlers.onMemberJoined(event).catch((err: unknown) => {
+            log.error("Unhandled error in member_joined handler.", {
+              senderId: event.senderId,
+              error:    err instanceof Error ? err.message : String(err),
+            });
+          });
+          continue;
+        }
+
+        if (event.type === "member_left" && groupHandlers.onMemberLeft) {
+          groupHandlers.onMemberLeft(event).catch((err: unknown) => {
+            log.error("Unhandled error in member_left handler.", {
+              senderId: event.senderId,
+              error:    err instanceof Error ? err.message : String(err),
+            });
+          });
+          continue;
+        }
+
+        // ── [3b] Message / postback — build context then dispatch ──────────
         const start = Date.now();
         this.contextBuilder
           .build(event)

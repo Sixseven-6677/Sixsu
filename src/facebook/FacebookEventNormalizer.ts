@@ -3,6 +3,8 @@ import {
   FBEvent,
   FBMessageEvent,
   FBPostbackEvent,
+  FBMemberJoinedEvent,
+  FBMemberLeftEvent,
   FBUnknownEvent,
   FBAttachment,
 } from "./types/events";
@@ -21,6 +23,25 @@ export class FacebookEventNormalizer {
         type: "postback",
         payload: entry.postback.payload,
         title: entry.postback.title,
+      };
+      return event;
+    }
+
+    if (entry.thread_action === "added_participants") {
+      const event: FBMemberJoinedEvent = {
+        ...base,
+        type: "member_joined",
+        addedByUserId: entry.sender.id,
+        members: (entry.added_participants ?? []).map((p) => p.id),
+      };
+      return event;
+    }
+
+    if (entry.thread_action === "removed_participants") {
+      const event: FBMemberLeftEvent = {
+        ...base,
+        type: "member_left",
+        members: (entry.removed_participants ?? []).map((p) => p.id),
       };
       return event;
     }

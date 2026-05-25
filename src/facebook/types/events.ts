@@ -23,8 +23,24 @@ export interface FBPostbackEvent extends FBBaseEvent {
   readonly title: string;
 }
 
+export interface FBMemberJoinedEvent extends FBBaseEvent {
+  readonly type: "member_joined";
+  readonly addedByUserId: string;
+  readonly members: string[];
+}
+
+export interface FBMemberLeftEvent extends FBBaseEvent {
+  readonly type: "member_left";
+  readonly members: string[];
+}
+
 export interface FBUnknownEvent extends FBBaseEvent {
   readonly type: "unknown";
 }
 
-export type FBEvent = FBMessageEvent | FBPostbackEvent | FBUnknownEvent;
+export type FBEvent =
+  | FBMessageEvent
+  | FBPostbackEvent
+  | FBMemberJoinedEvent
+  | FBMemberLeftEvent
+  | FBUnknownEvent;

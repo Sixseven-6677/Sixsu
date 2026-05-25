@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { WebhookBody } from "../types";
-import { FacebookGateway } from "../facebook/FacebookGateway";
+import { FacebookGateway, GroupHandlers } from "../facebook/FacebookGateway";
 import { handleMessage } from "../handlers/message.handler";
 
 /**
@@ -8,7 +8,10 @@ import { handleMessage } from "../handlers/message.handler";
  * applied as middleware in app.ts before this router is mounted, so all
  * requests reaching here have already been authenticated in production.
  */
-export function createWebhookRouter(gateway: FacebookGateway): Router {
+export function createWebhookRouter(
+  gateway:       FacebookGateway,
+  groupHandlers: GroupHandlers = {},
+): Router {
   const router = Router();
 
   router.get("/", (req: Request, res: Response) => {
@@ -24,7 +27,7 @@ export function createWebhookRouter(gateway: FacebookGateway): Router {
     }
 
     res.status(200).send("EVENT_RECEIVED");
-    gateway.processWebhookBody(body, handleMessage);
+    gateway.processWebhookBody(body, handleMessage, groupHandlers);
   });
 
   return router;
