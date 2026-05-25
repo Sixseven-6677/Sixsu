@@ -58,20 +58,49 @@ export class FacebookGateway {
 
     for (const entry of body.entry) {
       for (const messagingEntry of entry.messaging) {
+        // ── [1] Normalize the raw webhook payload ──────────────────────────
         const event = this.normalizer.normalize(messagingEntry);
 
         if (event.type === "unknown") {
-          log.warn("Skipping unknown event type.");
+          log.warn("Skipping unknown event type.", { raw: messagingEntry });
           continue;
         }
 
-        // Build context asynchronously (includes UserService DB/cache lookup),
-        // then dispatch to the handler — errors are logged and never surface to Facebook.
+        // ── [2] Log every event that enters the pipeline ───────────────────
+        log.debug("Event received — starting pipeline.", {
+          type:      event.type,
+          senderId:  event.senderId,
+          pageId:    event.pageId,
+          timestamp: event.timestamp,
+          ...(event.type === "message"
+            ? {
+                messageId:   event.messageId,
+                text:        event.text?.slice(0, 80),
+                attachments: event.attachments.length,
+              }
+            : { payload: event.payload?.slice(0, 80) }),
+        });
+
+        // ── [3] Build context (async) then dispatch to handler ─────────────
+        const start = Date.now();
         this.contextBuilder
           .build(event)
-          .then((ctx) => handler(ctx))
+          .then((ctx) => {
+            log.debug("Context built — dispatching to handler.", {
+              senderId:  event.senderId,
+              buildMs:   Date.now() - start,
+              userId:    ctx.user.id,
+              role:      ctx.user.role,
+              isNewUser: ctx.user.isNew,
+            });
+            return handler(ctx);
+          })
           .catch((err: unknown) => {
-            log.error("Unhandled error in message handler.", err);
+            const msg = err instanceof Error ? err.message : String(err);
+            log.error("Unhandled error in message pipeline.", {
+              senderId: event.senderId,
+              error:    msg,
+            });
           });
       }
     }
