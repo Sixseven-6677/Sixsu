@@ -1,0 +1,33 @@
+# Development-only files — excluded from Railway build context
+.env
+.env.*
+!.env.example
+
+# Credentials & secrets
+data/
+*.enc
+*.pem
+*.key
+appstate.json
+sessions.json
+
+# Logs
+logs/
+*.log
+
+# PM2 runtime files
+.pm2/
+pids/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tests
+coverage/
+__tests__/
+*.test.ts
+*.spec.ts
