@@ -1,6 +1,9 @@
 import { IMiddleware, MiddlewareFn, toMiddlewareFn } from "./types/IMiddleware";
-import { MiddlewareChain }  from "./MiddlewareChain";
-import { LoggerManager }    from "../logger/LoggerManager";
+import { Context }         from "../context/Context";
+import { ICommand }        from "../commands/types/ICommand";
+import { NextFn }          from "./types/IMiddleware";
+import { MiddlewareChain } from "./MiddlewareChain";
+import { LoggerManager }   from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("MiddlewareManager");
 
@@ -40,8 +43,18 @@ export class MiddlewareManager {
     return mw;
   }
 
+  /**
+   * Returns a MiddlewareFn whose `.name` property equals the middleware name.
+   * CommandPipeline uses `fn.name` for per-step debug tracing.
+   */
   fn(name: string): MiddlewareFn {
-    return toMiddlewareFn(this.get(name));
+    const mw = this.get(name);
+    // Computed-property name trick: JS assigns fn.name from the object key.
+    const namedFns: Record<string, MiddlewareFn> = {
+      [name]: (ctx: Context, command: ICommand | null, next: NextFn) =>
+        mw.handle(ctx, command, next),
+    };
+    return namedFns[name]!;
   }
 
   has(name: string): boolean {
@@ -53,10 +66,10 @@ export class MiddlewareManager {
    * If no names given, uses all registered in registration order.
    */
   createChain(...names: string[]): MiddlewareChain {
-    const chain = new MiddlewareChain();
+    const chain   = new MiddlewareChain();
     const targets = names.length > 0 ? names : this.order;
-    for (const name of targets) {
-      chain.use(this.get(name));
+    for (const n of targets) {
+      chain.use(this.get(n));
     }
     return chain;
   }
