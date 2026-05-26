@@ -38,6 +38,7 @@
     "chokidar": "^3.6.0",
     "dotenv": "^16.6.1",
     "express": "^4.22.2",
+    "fca-unofficial": "^0.6.4",
     "mongoose": "^9.6.2",
     "uuid": "^11.1.0"
   },
