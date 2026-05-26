@@ -18,8 +18,9 @@ import { FacebookConnection }          from "./facebook/FacebookConnection";
 import { FacebookClient }              from "./facebook/FacebookClient";
 import { FacebookSender }              from "./facebook/FacebookSender";
 import { CookieHttpClient }            from "./facebook/cookie/CookieHttpClient";
-import { CookieSender }                from "./facebook/cookie/CookieSender";
-import { MessengerPoller }             from "./facebook/cookie/MessengerPoller";
+import { MiraiTransport }              from "./facebook/mirai/MiraiTransport";
+import { MiraiSender }                 from "./facebook/mirai/MiraiSender";
+import { FcaEventAdapter }             from "./facebook/mirai/FcaEventAdapter";
 import { ISender }                     from "./facebook/types/ISender";
 import { FacebookEventNormalizer }     from "./facebook/FacebookEventNormalizer";
 import { FacebookGateway }             from "./facebook/FacebookGateway";
@@ -69,7 +70,7 @@ function buildBanMessage(entry: BanEntry): string {
 
 async function bootstrap(): Promise<void> {
 
-  // ── Cookie-only auth check ────────────────────────────────────────────────
+  // ── AppState check ────────────────────────────────────────────────────────
   const appStateEnvKey = config.auth.appStateEnvKey;
   const appStateValue  = process.env[appStateEnvKey] ?? process.env["FB_APPSTATE"];
   if (!appStateValue && !config.auth.appStateFile) {
@@ -109,9 +110,7 @@ async function bootstrap(): Promise<void> {
     auth.registerAccount("default", provider);
   }
 
-  // Load credentials now so sender can use them
   await auth.loginAll();
-
   bot.register(auth);
 
   const sessionStore   = new SessionStore(config.auth.sessionFile, config.auth.sessionSecret ?? "");
@@ -130,17 +129,26 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(reconnect);
 
-  // ── Sender: cookies first, page token as fallback ─────────────────────────
-  let sender: ISender;
-  let cookieClient: CookieHttpClient | null = null;
+  // ── Facebook Transport: MiraiTransport (fca-unofficial) ───────────────────
+  // Uses the same session (AppState) for both listening and sending,
+  // avoiding the cookie-conflict issues of having two auth mechanisms.
+  let sender:         ISender;
+  let cookieClient:   CookieHttpClient  | null = null;
+  let miraiTransport: MiraiTransport    | null = null;
+  let botUserId                               = "";
 
   const credentials = auth.getCredentials("default");
 
   if (credentials) {
-    cookieClient = new CookieHttpClient(credentials.appState);
-    sender       = new CookieSender(cookieClient);
-    log.info("Sender: CookieSender active (AppState cookies).", {
-      userId: cookieClient.getUserId(),
+    // Keep CookieHttpClient solely for the fb-cookie-client plugin service.
+    cookieClient   = new CookieHttpClient(credentials.appState);
+    botUserId      = cookieClient.getUserId();
+
+    miraiTransport = new MiraiTransport(credentials.appState);
+    sender         = new MiraiSender(miraiTransport);
+
+    log.info("Sender: MiraiSender active (fca-unofficial via AppState).", {
+      userId: botUserId,
     });
   } else if (config.facebook.pageAccessToken) {
     const connection = new FacebookConnection();
@@ -155,7 +163,7 @@ async function bootstrap(): Promise<void> {
 
   setGroupSender(sender);
 
-  const normalizer = new FacebookEventNormalizer();
+  const normalizer  = new FacebookEventNormalizer();
   const connection  = new FacebookConnection();
   const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
@@ -165,8 +173,8 @@ async function bootstrap(): Promise<void> {
   const userSvc  = new UserService(userRepo, cache.store("users"));
   gateway.getContextBuilder().setUserService(userSvc);
   setUserService(userSvc);
-  // ─────────────────────────────────────────────────────────────────────────
 
+  // ── Commands ──────────────────────────────────────────────────────────────
   const registry    = new CommandRegistry();
   const loader      = new CommandLoader(registry);
   const commandsDir = path.resolve(config.bot.commandsDir);
@@ -215,35 +223,48 @@ async function bootstrap(): Promise<void> {
   svcReg.provide("user-service",     userSvc,   "core");
 
   if (cookieClient) {
+    // fb-cookie-client kept for backward compatibility with plugins
     svcReg.provide("fb-cookie-client", cookieClient, "core");
     log.info("Core service registered: fb-cookie-client.");
+  }
 
-    // ── Messenger Poller — استقبال الرسائل عبر cookies بدون webhook ────────
-    const poller = new MessengerPoller(cookieClient);
-    poller.setHandler((entries) => {
+  // ── MiraiTransport: FCA event listener → Adapter → Pipeline ───────────────
+  if (miraiTransport) {
+    const adapter = new FcaEventAdapter(botUserId);
+
+    miraiTransport.setEventHandler((fcaEvent) => {
+      const entries = adapter.adapt(fcaEvent);
+
       for (const entry of entries) {
-        const fakeBody = {
-          object: "page",
-          entry: [{
-            id:        cookieClient!.getUserId(),
-            time:      Date.now(),
-            messaging: [entry],
-          }],
-        };
-        gateway.processWebhookBody(fakeBody, handleMessage, {
-          onMemberJoined: handleMemberJoined,
-          onMemberLeft:   handleMemberLeft,
-        });
+        // ── [DEBUG-3] Handing MessagingEntry to gateway pipeline ─────────
+        gateway.processWebhookBody(
+          {
+            object: "page",
+            entry: [{
+              id:        botUserId,
+              time:      entry.timestamp,
+              messaging: [entry],
+            }],
+          },
+          handleMessage,
+          {
+            onMemberJoined: handleMemberJoined,
+            onMemberLeft:   handleMemberLeft,
+          },
+        );
       }
     });
-    bot.register(poller);
-    log.info("MessengerPoller registered — polling for new messages.");
-    // ─────────────────────────────────────────────────────────────────────
+
+    bot.register(miraiTransport);
+
+    log.info("MiraiTransport registered — fca-unofficial MQTT listener active.", {
+      userId: botUserId,
+    });
   }
 
   bot.register(pluginManager);
-  // ─────────────────────────────────────────────────────────────────────────
 
+  // ── Express server ────────────────────────────────────────────────────────
   const app = createApp(gateway, {
     onMemberJoined: handleMemberJoined,
     onMemberLeft:   handleMemberLeft,
