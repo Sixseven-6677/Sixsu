@@ -20,9 +20,10 @@ const USER_AGENT  =
  * explicitly invalidated.
  */
 export class CookieHttpClient {
-  private readonly http:      AxiosInstance;
-  private readonly userId:    string;
-  private readonly cookieStr: string;
+  private readonly http:        AxiosInstance;
+  private readonly userId:      string;
+  private readonly cookieStr:   string;
+  private readonly rawAppState: AppState;
 
   private fbDtsg:       string | null = null;
   private lsd:          string | null = null;
@@ -37,8 +38,9 @@ export class CookieHttpClient {
       );
     }
 
-    this.userId    = cUser.value;
-    this.cookieStr = appState.map((c) => `${c.key}=${c.value}`).join("; ");
+    this.userId      = cUser.value;
+    this.cookieStr   = appState.map((c) => `${c.key}=${c.value}`).join("; ");
+    this.rawAppState = appState;
 
     this.http = axios.create({
       baseURL: FB_ORIGIN,
@@ -60,6 +62,14 @@ export class CookieHttpClient {
   /** The Facebook user ID taken from the c_user cookie. */
   getUserId(): string {
     return this.userId;
+  }
+
+  /**
+   * Returns the raw AppState cookie array.
+   * Used by MessengerPoller to pass to fca-unofficial's login().
+   */
+  getRawAppState(): AppState {
+    return this.rawAppState;
   }
 
   /**
@@ -93,42 +103,17 @@ export class CookieHttpClient {
       responseType: "text",
     });
 
-    return this.parseResponse(res.data as string);
-  }
+    const raw = res.data as string;
 
-  /**
-   * Make an authenticated POST to any Facebook AJAX endpoint (e.g. Mercury API).
-   * Automatically fetches and injects fb_dtsg + lsd.
-   *
-   * @param path    Relative path, e.g. "/ajax/mercury/thread_list.php"
-   * @param params  Extra form-data parameters.
-   */
-  async apiPost(path: string, params: Record<string, string>): Promise<unknown> {
-    await this.ensureTokens();
+    // Facebook returns one JSON object per line — take the first valid one.
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (t.startsWith("{") || t.startsWith("[")) {
+        try { return JSON.parse(t); } catch { /* try next line */ }
+      }
+    }
 
-    const body = new URLSearchParams({
-      av:      this.userId,
-      __user:  this.userId,
-      __a:     "1",
-      __req:   "b",
-      __be:    "-1",
-      fb_dtsg: this.fbDtsg!,
-      lsd:     this.lsd ?? "",
-      ...params,
-    });
-
-    const res = await this.http.post(path, body.toString(), {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie":       this.cookieStr,
-        "Origin":       FB_ORIGIN,
-        "Referer":      `${FB_ORIGIN}/messages/`,
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      responseType: "text",
-    });
-
-    return this.parseResponse(res.data as string);
+    return raw;
   }
 
   /**
@@ -142,30 +127,6 @@ export class CookieHttpClient {
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────
-
-  /**
-   * Parse a Facebook response — strips the `for (;;);` prefix Facebook
-   * prepends to AJAX responses, then returns the first valid JSON object.
-   */
-  private parseResponse(raw: string): unknown {
-    // Strip Facebook's AJAX hijacking prefix
-    const stripped = raw.replace(/^for\s*\(;;\s*\);/, "").trim();
-
-    // Try the whole stripped string first
-    if (stripped.startsWith("{") || stripped.startsWith("[")) {
-      try { return JSON.parse(stripped); } catch { /* fall through to line-by-line */ }
-    }
-
-    // Facebook sometimes returns one JSON object per line
-    for (const line of raw.split("\n")) {
-      const t = line.trim();
-      if (t.startsWith("{") || t.startsWith("[")) {
-        try { return JSON.parse(t); } catch { /* try next line */ }
-      }
-    }
-
-    return raw;
-  }
 
   private async ensureTokens(): Promise<void> {
     if (this.fbDtsg) return;
@@ -200,7 +161,7 @@ export class CookieHttpClient {
     const html = res.data as string;
 
     // ── fb_dtsg — try three known patterns ──────────────────────────────
-    let match =
+    const match =
       html.match(/"DTSGInitialData"\s*,\s*\[\s*\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/) ??
       html.match(/name="fb_dtsg"\s+value="([^"]+)"/)                                    ??
       html.match(/"fb_dtsg"\s*:\s*\{\s*"value"\s*:\s*"([^"]+)"/)                        ??
