@@ -15,7 +15,7 @@ export function createApp(gateway: FacebookGateway, groupHandlers: GroupHandlers
   );
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
-  app.get("/health", (_req, res) => {
+  app.get(["/health", "/api/health", "/api/healthz"], (_req, res) => {
     res.status(200).json({ status: "ok", uptime: process.uptime() });
   });
 
