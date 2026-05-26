@@ -12,16 +12,25 @@ const fcaLogin = require("fca-unofficial") as (
 
 export type FcaEventHandler = (event: FcaEvent) => void;
 
+/** Facebook error codes that indicate an unrecoverable session problem. */
+const FATAL_FB_ERRORS = new Set([
+  1357004, // "Not logged in" — AppState expired or MQTT seq-id missing
+  1357031, // Checkpoint / suspicious login
+  1357045, // Account locked
+]);
+
 /**
  * MiraiTransport — Facebook transport layer for Sixsu.
  *
- * Key design decisions:
- *   • autoReconnect: true  → fca-unofficial handles MQTT-layer reconnects
- *     internally.  The listen() callback only fires for real events or
- *     fatal session-level errors (not transient MQTT hiccups).
- *   • loginAttempts counter only resets when the listener has been stable
- *     for 30 s, so we do not spin-loop on a broken session.
- *   • Exposes the live FcaApi to MiraiSender so both share the same session.
+ * Uses fca-unofficial (proven in Fang / isoy-fca 1.3.10) as a Facebook
+ * MQTT transport.
+ *
+ * autoReconnect: true → fca-unofficial handles transient MQTT drops
+ * internally; our listen() callback fires only for real events or fatal
+ * session errors (e.g. error 1357004 "Not logged in").
+ *
+ * On fatal error the transport stops retrying and logs a clear message
+ * asking the operator to refresh the AppState.
  */
 export class MiraiTransport implements ISystem {
   readonly name = "mirai-transport";
@@ -36,7 +45,7 @@ export class MiraiTransport implements ISystem {
   private listenerStartMs   = 0;
 
   private static readonly MAX_LOGIN_ATTEMPTS  = 5;
-  private static readonly STABLE_LISTEN_MS    = 30_000;
+  private static readonly STABLE_LISTEN_MS    = 30_000;  // reset counter after 30 s of stable listening
   private static readonly BASE_LOGIN_DELAY_MS = 5_000;
   private static readonly MAX_LOGIN_DELAY_MS  = 120_000;
 
@@ -48,7 +57,7 @@ export class MiraiTransport implements ISystem {
     forceLogin:        false,
     autoMarkDelivered: true,
     autoMarkRead:      false,
-    autoReconnect:     true,  // fca-unofficial handles MQTT reconnects internally
+    autoReconnect:     true,   // fca-unofficial handles transient MQTT reconnects
   };
 
   constructor(appState: FcaCookie[]) {
@@ -59,17 +68,9 @@ export class MiraiTransport implements ISystem {
     this.eventHandler = handler;
   }
 
-  getApi(): FcaApi | null {
-    return this.api;
-  }
-
-  getCurrentUserId(): string {
-    return this.api?.getCurrentUserID() ?? "";
-  }
-
-  getAppState(): FcaCookie[] {
-    return this.api?.getAppState() ?? this.appState;
-  }
+  getApi(): FcaApi | null         { return this.api; }
+  getCurrentUserId(): string      { return this.api?.getCurrentUserID() ?? ""; }
+  getAppState(): FcaCookie[]      { return this.api?.getAppState() ?? this.appState; }
 
   // ── ISystem ──────────────────────────────────────────────────────────────
 
@@ -81,15 +82,9 @@ export class MiraiTransport implements ISystem {
 
   async destroy(): Promise<void> {
     this.running = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
-    if (this.api) {
-      try { this.api.logout(); } catch { /* ignore */ }
-      this.api = null;
-    }
+    if (this.api) { try { this.api.logout(); } catch { /**/ } this.api = null; }
     log.info("MiraiTransport: destroyed.");
   }
 
@@ -109,7 +104,7 @@ export class MiraiTransport implements ISystem {
 
           log.warn("MiraiTransport: login failed.", { error: errMsg });
           resolve();
-          this.scheduleReLogin();
+          this.scheduleReLogin("login-error");
           return;
         }
 
@@ -135,28 +130,45 @@ export class MiraiTransport implements ISystem {
     this.stopListenFn = this.api.listen((err, event) => {
       if (err) {
         const stableMs = Date.now() - this.listenerStartMs;
-        const errMsg = err instanceof Error
-          ? err.message
-          : (typeof err === "object" && err !== null
-              ? JSON.stringify(err)
-              : String(err));
 
-        log.warn("MiraiTransport: listener error (fatal session error).", {
-          error:    errMsg,
-          stableMs,
+        // Parse the raw error — fca-unofficial may return a plain object
+        let errCode: number | undefined;
+        let errMsg: string;
+
+        if (err instanceof Error) {
+          errMsg = err.message;
+        } else if (typeof err === "object" && err !== null) {
+          const e = err as Record<string, unknown>;
+          errCode = typeof e["error"] === "number" ? e["error"] : undefined;
+          errMsg  = JSON.stringify(err);
+        } else {
+          errMsg = String(err);
+        }
+
+        // ── Fatal Facebook session errors — stop retrying ──────────────
+        if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
+          log.warn(
+            "MiraiTransport: FATAL session error — AppState is expired or invalid." +
+            " Please refresh APPSTATE in Railway environment variables and redeploy.",
+            { fbErrorCode: errCode, error: errMsg },
+          );
+          // Stop the transport — retrying is pointless until AppState is refreshed
+          this.running = false;
+          this.stopListening();
+          this.api = null;
+          return;
+        }
+
+        log.warn("MiraiTransport: listener error — scheduling re-login.", {
+          error: errMsg, stableMs,
         });
 
-        // If the listener was stable for 30+ seconds before failing,
-        // this is a transient issue — reset the login counter so backoff
-        // does not grow forever.
         if (stableMs >= MiraiTransport.STABLE_LISTEN_MS) {
           this.loginAttempts = 0;
           log.info("MiraiTransport: listener was stable — resetting login counter.");
         }
 
-        // Schedule a full re-login (fca-unofficial's autoReconnect already
-        // handled transient MQTT issues; reaching here means a session error).
-        this.scheduleReLogin();
+        this.scheduleReLogin("listen-error");
         return;
       }
 
@@ -173,12 +185,12 @@ export class MiraiTransport implements ISystem {
 
   private stopListening(): void {
     if (this.stopListenFn) {
-      try { this.stopListenFn(); } catch { /* ignore */ }
+      try { this.stopListenFn(); } catch { /**/ }
       this.stopListenFn = null;
     }
   }
 
-  private scheduleReLogin(): void {
+  private scheduleReLogin(reason: string): void {
     if (!this.running) return;
 
     this.loginAttempts++;
@@ -196,9 +208,7 @@ export class MiraiTransport implements ISystem {
     );
 
     log.info("MiraiTransport: scheduling re-login.", {
-      attempt:     this.loginAttempts,
-      maxAttempts: MiraiTransport.MAX_LOGIN_ATTEMPTS,
-      delayMs:     delay,
+      reason, attempt: this.loginAttempts, maxAttempts: MiraiTransport.MAX_LOGIN_ATTEMPTS, delayMs: delay,
     });
 
     this.stopListening();
