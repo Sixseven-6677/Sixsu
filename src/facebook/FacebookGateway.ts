@@ -34,10 +34,6 @@ export class FacebookGateway {
     this.contextBuilder = new ContextBuilder(sender);
   }
 
-  /**
-   * Returns the ContextBuilder so that bootstrap can inject services
-   * (e.g. UserService) after construction.
-   */
   getContextBuilder(): ContextBuilder {
     return this.contextBuilder;
   }
@@ -70,7 +66,7 @@ export class FacebookGateway {
 
     for (const entry of body.entry) {
       for (const messagingEntry of entry.messaging) {
-        // ── [1] Normalize the raw webhook payload ──────────────────────────
+        // ── [1] Normalize raw webhook payload ──────────────────────────────
         const event = this.normalizer.normalize(messagingEntry);
 
         if (event.type === "unknown") {
@@ -78,8 +74,9 @@ export class FacebookGateway {
           continue;
         }
 
-        // ── [2] Log every event that enters the pipeline ───────────────────
-        log.debug("Event received — starting pipeline.", {
+        // ── [2] Log every event entering the pipeline ───────────────────────
+        // [DEBUG-3] Event received — starting pipeline
+        log.info("Gateway: event received — starting pipeline.", {
           type:      event.type,
           senderId:  event.senderId,
           pageId:    event.pageId,
@@ -99,7 +96,7 @@ export class FacebookGateway {
                   : {}),
         });
 
-        // ── [3a] Group member events — dispatch directly (no context build) ─
+        // ── [3a] Group member events ─────────────────────────────────────────
         if (event.type === "member_joined" && groupHandlers.onMemberJoined) {
           groupHandlers.onMemberJoined(event).catch((err: unknown) => {
             log.error("Unhandled error in member_joined handler.", {
@@ -127,12 +124,14 @@ export class FacebookGateway {
         this.contextBuilder
           .build(event)
           .then((ctx) => {
-            log.debug("Context built — dispatching to handler.", {
+            // ── [DEBUG-4] Context created — middleware chain starting ──────
+            log.info("Gateway: context created — dispatching to handler.", {
               senderId:  event.senderId,
               buildMs:   Date.now() - start,
               userId:    ctx.user.id,
               role:      ctx.user.role,
               isNewUser: ctx.user.isNew,
+              text:      event.type === "message" ? event.text?.slice(0, 80) : undefined,
             });
             return handler(ctx);
           })
