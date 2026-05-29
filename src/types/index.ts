@@ -1,5 +1,8 @@
 export interface MessagingEntry {
   sender: { id: string };
+  /** Real Facebook user ID — populated by FcaEventAdapter for group chats
+   *  where sender.id carries the threadID for reply routing. */
+  senderFbId?: string;
   recipient: { id: string };
   timestamp: number;
   message?: IncomingMessage;
@@ -43,3 +46,4 @@ export interface SendMessagePayload {
   recipient: { id: string };
   message: { text: string } | { attachment: object };
 }
+
