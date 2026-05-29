@@ -43,8 +43,10 @@ export class ContextBuilder {
   /**
    * Builds a Context asynchronously.
    *
-   * When UserService is available the user record is fetched/created from the
-   * database (or served from cache) so ctx.user is fully populated.
+   * thread.id  = event.senderId  (threadID in FCA — correct reply routing)
+   * user lookup = event.senderFbId ?? event.senderId
+   *   In group chats (FCA), senderFbId is the real Facebook user ID while
+   *   senderId carries the threadID for routing. In DMs they are the same.
    *
    * On any error the builder falls back to a minimal user object so the
    * message is never silently dropped.
@@ -52,24 +54,30 @@ export class ContextBuilder {
   async build(event: FBMessageEvent | FBPostbackEvent): Promise<Context> {
 
     const buildStart = Date.now();
-    log.debug("Building context.", {
-      senderId:  event.senderId,
-      eventType: event.type,
-      hasUserService: Boolean(this.userService),
-    });
 
+    // thread.id is always the routing destination (threadID for FCA)
     const thread:  ContextThread  = { id: event.senderId, pageId: event.pageId };
     const message: ContextMessage = this.buildMessage(event);
 
+    // Real user identity: senderFbId (group chats) or senderId (DMs/non-FCA)
+    const userLookupId = event.senderFbId ?? event.senderId;
+
+    log.debug("Building context.", {
+      threadId:    event.senderId,
+      userLookupId,
+      eventType:   event.type,
+      hasUserService: Boolean(this.userService),
+    });
+
     // ── User resolution ───────────────────────────────────────────────────
-    let user:   ContextUser = FALLBACK_USER(event.senderId);
+    let user:   ContextUser = FALLBACK_USER(userLookupId);
     let source: "db" | "cache" | "fallback" = "fallback";
 
     if (this.userService) {
       try {
-        log.debug("UserService.findOrCreate — start.", { fbId: event.senderId });
+        log.debug("UserService.findOrCreate — start.", { fbId: userLookupId });
         const t0     = Date.now();
-        const record = await this.userService.findOrCreate(event.senderId);
+        const record = await this.userService.findOrCreate(userLookupId);
         const lookupMs = Date.now() - t0;
 
         user = {
@@ -85,7 +93,7 @@ export class ContextBuilder {
         source = "db";
 
         log.debug("UserService.findOrCreate — done.", {
-          fbId:         event.senderId,
+          fbId:         userLookupId,
           role:         user.role,
           isNew:        user.isNew,
           messageCount: user.messageCount,
@@ -94,19 +102,19 @@ export class ContextBuilder {
       } catch (err) {
         source = "fallback";
         log.warn("UserService lookup failed — using fallback user.", {
-          fbId:  event.senderId,
+          fbId:  userLookupId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     } else {
       log.debug("No UserService injected — using fallback user.", {
-        fbId: event.senderId,
+        fbId: userLookupId,
       });
     }
 
     const totalMs = Date.now() - buildStart;
     log.debug("Context ready.", {
-      senderId: event.senderId,
+      threadId: event.senderId,
       userId:   user.id,
       role:     user.role,
       source,
