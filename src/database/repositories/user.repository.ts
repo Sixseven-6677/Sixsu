@@ -24,11 +24,14 @@ export class UserRepository extends BaseRepository<
 
   /**
    * Atomically upserts the user record on every incoming message:
-   *   - Creates the document with role "user" if it does not exist.
+   *   - Creates the document on first seen (role "user", messageCount defaults to 0 via schema).
    *   - Updates lastSeenAt and name (when provided) on every call.
    *   - Increments messageCount by 1 atomically via $inc.
    *
-   * Returns the updated document and whether it was newly created.
+   * NOTE: messageCount is intentionally NOT in $setOnInsert.
+   * Specifying the same path in both $setOnInsert and $inc in the same update
+   * causes a MongoDB "Conflicting update operators" error (MongoServerError code 40).
+   * The schema default of 0 handles the initial value; $inc brings it to 1.
    */
   async trackActivity(
     fbId:  string,
@@ -37,11 +40,10 @@ export class UserRepository extends BaseRepository<
     try {
       const nameSet = name ? { name } : {};
 
-      // rawResult: true gives us lastErrorObject so we can detect upserts
       const raw = await UserModel.findOneAndUpdate(
         { fbId },
         {
-          $setOnInsert: { fbId, role: "user", preferences: {}, messageCount: 0 },
+          $setOnInsert: { fbId, role: "user", preferences: {} },
           $set:         { lastSeenAt: new Date(), ...nameSet },
           $inc:         { messageCount: 1 },
         },
