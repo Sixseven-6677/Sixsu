@@ -234,6 +234,14 @@ async function bootstrap(): Promise<void> {
     log.info("Core service registered: fb-cookie-client.");
   }
 
+  // BUG FIX: fb-access-token was never registered, causing /avatar to always
+  // fail and /userinfo to have no profile picture. Register it so UtilityPlugin
+  // can create FacebookProfileService successfully.
+  if (config.facebook.pageAccessToken) {
+    svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
+    log.info("Core service registered: fb-access-token.");
+  }
+
   // ── MiraiTransport: FCA event listener → Adapter → Pipeline ───────────────
   if (miraiTransport) {
     const adapter = new FcaEventAdapter(botUserId);
