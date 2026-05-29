@@ -68,6 +68,12 @@ function buildBanMessage(entry: BanEntry): string {
   return `🚫 أنت محظور من استخدام البوت.${reason}${durStr}`;
 }
 
+/** Returns true only if MONGODB_URI is a complete, valid connection string. */
+function isValidMongoUri(uri: string): boolean {
+  return (uri.startsWith("mongodb://") && uri.length > 10) ||
+         (uri.startsWith("mongodb+srv://") && uri.length > 14);
+}
+
 async function bootstrap(): Promise<void> {
 
   // ── AppState check ────────────────────────────────────────────────────────
@@ -95,8 +101,24 @@ async function bootstrap(): Promise<void> {
   const cache = new CacheManager({ provider: await createCacheProvider() });
   bot.register(cache);
 
-  const db = new DatabaseManager();
-  bot.register(db);
+  // ── Database (optional) ──────────────────────────────────────────────────
+  // Only register the DB system when MONGODB_URI is a complete, valid URI.
+  // An empty string or a bare "mongodb://" prefix is treated as "no DB".
+  const mongoUri = config.database.mongoUri;
+  if (isValidMongoUri(mongoUri)) {
+    const db = new DatabaseManager();
+    bot.register(db);
+    log.info("Database: MongoDB enabled.");
+  } else {
+    if (mongoUri) {
+      log.warn(
+        `Database: MONGODB_URI looks invalid ("${mongoUri.slice(0, 20)}…") — ` +
+        "skipping MongoDB. Bot will run without persistence."
+      );
+    } else {
+      log.info("Database: MONGODB_URI not set — running without persistence.");
+    }
+  }
 
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
@@ -132,8 +154,6 @@ async function bootstrap(): Promise<void> {
   bot.register(reconnect);
 
   // ── Facebook Transport: MiraiTransport (fca-unofficial) ───────────────────
-  // Uses the same session (AppState) for both listening and sending,
-  // avoiding the cookie-conflict issues of having two auth mechanisms.
   let sender:         ISender;
   let cookieClient:   CookieHttpClient  | null = null;
   let miraiTransport: MiraiTransport    | null = null;
@@ -142,7 +162,6 @@ async function bootstrap(): Promise<void> {
   const credentials = auth.getCredentials("default");
 
   if (credentials) {
-    // Keep CookieHttpClient solely for the fb-cookie-client plugin service.
     cookieClient   = new CookieHttpClient(credentials.appState);
     botUserId      = cookieClient.getUserId();
 
@@ -229,14 +248,10 @@ async function bootstrap(): Promise<void> {
   svcReg.provide("user-service",     userSvc,   "core");
 
   if (cookieClient) {
-    // fb-cookie-client kept for backward compatibility with plugins
     svcReg.provide("fb-cookie-client", cookieClient, "core");
     log.info("Core service registered: fb-cookie-client.");
   }
 
-  // BUG FIX: fb-access-token was never registered, causing /avatar to always
-  // fail and /userinfo to have no profile picture. Register it so UtilityPlugin
-  // can create FacebookProfileService successfully.
   if (config.facebook.pageAccessToken) {
     svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
     log.info("Core service registered: fb-access-token.");
@@ -250,7 +265,6 @@ async function bootstrap(): Promise<void> {
       const entries = adapter.adapt(fcaEvent);
 
       for (const entry of entries) {
-        // ── [DEBUG-3] Handing MessagingEntry to gateway pipeline ─────────
         gateway.processWebhookBody(
           {
             object: "page",
