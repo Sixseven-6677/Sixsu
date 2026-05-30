@@ -8,8 +8,7 @@
     "dev": "node scripts/patch-fca.js && export NODE_ENV=development && npx ts-node -r tsconfig-paths/register src/index.ts",
     "build": "node scripts/patch-fca.js && npx tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "preinstall": "node scripts/preinstall.js"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "axios": "^1.16.0",
