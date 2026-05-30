@@ -293,10 +293,14 @@ async function bootstrap(): Promise<void> {
   bot.register(pluginManager);
 
   // ── Express server ────────────────────────────────────────────────────────
-  const app = createApp(gateway, {
-    onMemberJoined: handleMemberJoined,
-    onMemberLeft:   handleMemberLeft,
-  });
+  const app = createApp(
+    gateway,
+    {
+      onMemberJoined: handleMemberJoined,
+      onMemberLeft:   handleMemberLeft,
+    },
+    miraiTransport,
+  );
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(config.port, () => {
@@ -310,6 +314,18 @@ async function bootstrap(): Promise<void> {
   });
 
   await bot.start();
+
+  // Delayed status report — fires 15 s after startup so Railway captures it.
+  setTimeout(() => {
+    const mqttConnected = miraiTransport ? miraiTransport.getApi() !== null : false;
+    log.info("── BOT STATUS REPORT (15s) ──────────────────────────────────", {
+      mqttConnected,
+      botUserId:   miraiTransport?.getCurrentUserId() || "–",
+      botPrefix:   config.bot.prefix,
+      nodeEnv:     config.nodeEnv,
+      uptime:      Math.round(process.uptime()) + "s",
+    });
+  }, 15_000);
 
   if (process.send) {
     process.send("ready");
