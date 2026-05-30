@@ -1,11 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const indexPath = path.join(__dirname, '../node_modules/fca-unofficial/index.js');
+const indexPath  = path.join(__dirname, '../node_modules/fca-unofficial/index.js');
 const listenPath = path.join(__dirname, '../node_modules/fca-unofficial/src/listenMqtt.js');
-const utilsPath = path.join(__dirname, '../node_modules/fca-unofficial/utils.js');
+const utilsPath  = path.join(__dirname, '../node_modules/fca-unofficial/utils.js');
 
-// ---- Patch 1: index.js — Facebook 2025+ MqttWebConfig regex ----
+// ══════════════════════════════════════════════════════════════════
+// Patch 1: index.js — Facebook 2025+ MqttWebConfig regex
+// ══════════════════════════════════════════════════════════════════
 let idx = fs.readFileSync(indexPath, 'utf8');
 if (!idx.includes('quotedFBMQTTMatch')) {
   const OLD = `      } else {
@@ -16,7 +18,7 @@ if (!idx.includes('quotedFBMQTTMatch')) {
         // Facebook 2025+: quoted JSON keys in MqttWebConfig
         var quotedFBMQTTMatch = html.match(/\\["MqttWebConfig",\\[\\],\\{"fbid":"(.+?)","appID":219994525426954,"endpoint":"(.+?)"/);
         if (quotedFBMQTTMatch) {
-          mqttEndpoint = quotedFBMQTTMatch[2].replace(/\\\\\/g, "/");
+          mqttEndpoint = quotedFBMQTTMatch[2].replace(/\\\\\\//g, "/");
           region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
           log.info("login", \`Got this account's message region: \${region}\`);
         } else {
@@ -29,87 +31,105 @@ if (!idx.includes('quotedFBMQTTMatch')) {
     fs.writeFileSync(indexPath, idx);
     console.log('[patch-fca] index.js: MqttWebConfig 2025+ regex patched OK');
   } else {
-    console.warn('[patch-fca] index.js: target not found, skipping');
+    console.warn('[patch-fca] index.js: target not found — already patched or changed');
   }
 } else {
   console.log('[patch-fca] index.js: already patched');
 }
 
-// ---- Patch 2: utils.js — Modern fb_dtsg extraction (DTSGInitData format) ----
+// ══════════════════════════════════════════════════════════════════
+// Patch 2: utils.js — Modern fb_dtsg extraction (DTSGInitData format)
+// ══════════════════════════════════════════════════════════════════
 let utils = fs.readFileSync(utilsPath, 'utf8');
-const OLD_DTSG = "  var fb_dtsg = getFrom(html, 'name=\"fb_dtsg\" value=\"', '\"');";
-const NEW_DTSG = `  var fb_dtsg = getFrom(html, 'name="fb_dtsg" value="', '"');
-  // Facebook 2025+: fb_dtsg is in DTSGInitData, not a form field
+if (!utils.includes('DTSGInitData')) {
+  // Try both spacing variants
+  const targets = [
+    "  var fb_dtsg = getFrom(html, 'name=\"fb_dtsg\" value=\"', '\"');",
+    "var fb_dtsg = getFrom(html, 'name=\"fb_dtsg\" value=\"', '\"');",
+  ];
+  const dtsgPatch = `  var fb_dtsg = getFrom(html, 'name="fb_dtsg" value="', '"');
   if (!fb_dtsg) {
-    var dtsgMatch = html.match(/"DTSGInitData",\\[\\],\\{"token":"([^"]+)"/);
-    if (dtsgMatch) {
-      fb_dtsg = dtsgMatch[1];
-      log.info("makeDefaults", "Extracted fb_dtsg via DTSGInitData pattern");
-    }
+    var _dtsgM = html.match(/"DTSGInitData",\\[\\],\\{"token":"([^"]+)"/) ||
+                 html.match(/"DTSGInitData",\\[\\],\\{"token":"([^"]+)"/);
+    if (_dtsgM) { fb_dtsg = _dtsgM[1]; log.info("makeDefaults", "fb_dtsg via DTSGInitData OK"); }
   }`;
-if (utils.includes(OLD_DTSG)) {
-  utils = utils.replace(OLD_DTSG, NEW_DTSG);
-  fs.writeFileSync(utilsPath, utils);
-  console.log('[patch-fca] utils.js: DTSGInitData fb_dtsg extraction patched OK');
-} else {
-  // Try alternative match
-  const ALT = "var fb_dtsg = getFrom(html, 'name=\"fb_dtsg\" value=\"', '\"');";
-  if (utils.includes(ALT)) {
-    utils = utils.replace(ALT, NEW_DTSG.replace('  ', ''));
-    fs.writeFileSync(utilsPath, utils);
-    console.log('[patch-fca] utils.js: DTSGInitData fb_dtsg patched (alt match) OK');
-  } else if (utils.includes('DTSGInitData')) {
-    console.log('[patch-fca] utils.js: already patched');
-  } else {
-    // Direct regex replacement
-    const re = /var fb_dtsg = getFrom\(html, 'name="fb_dtsg" value="', '"'\);/;
-    if (re.test(utils)) {
-      utils = utils.replace(re, `var fb_dtsg = getFrom(html, 'name="fb_dtsg" value="', '"');
-  if (!fb_dtsg) { var dtsgM = html.match(/"DTSGInitData",\\[\\],\\{"token":"([^"]+)"/); if (dtsgM) { fb_dtsg = dtsgM[1]; } }`);
-      fs.writeFileSync(utilsPath, utils);
-      console.log('[patch-fca] utils.js: DTSGInitData fb_dtsg patched via regex OK');
-    } else {
-      console.warn('[patch-fca] utils.js: COULD NOT PATCH fb_dtsg extraction');
+  let patched = false;
+  for (const target of targets) {
+    if (utils.includes(target)) {
+      utils = utils.replace(target, dtsgPatch);
+      patched = true;
+      break;
     }
   }
+  if (patched) {
+    fs.writeFileSync(utilsPath, utils);
+    console.log('[patch-fca] utils.js: DTSGInitData fb_dtsg patched OK');
+  } else {
+    console.warn('[patch-fca] utils.js: fb_dtsg target not found — skipping');
+  }
+} else {
+  console.log('[patch-fca] utils.js: already patched');
 }
 
-// ---- Patch 3: listenMqtt.js — fix av field + resilient catch handler ----
+// ══════════════════════════════════════════════════════════════════
+// Patch 3: listenMqtt.js — fix ALL "av": ctx.globalOptions.pageID
+//
+// ROOT CAUSE: pageID is empty when using AppState (no Page token).
+// getSeqID sends av="" → Facebook returns error → seqId never set
+// → MQTT starts with lastSeqId=null → only "presence" events, NO messages.
+//
+// FIX: Replace pageID with (pageID || userID) in ALL 3 locations:
+//   1. getSeqID form (line ~765) — critical: without this seqId fetch fails
+//   2. parseDelta ForcedFetch (line ~533) — group image messages
+//   3. parseDelta replyToMessageId (line ~400) — message replies
+// ══════════════════════════════════════════════════════════════════
 let lmq = fs.readFileSync(listenPath, 'utf8');
 
-// Fix ALL occurrences of av field
 const avOld = '"av": ctx.globalOptions.pageID,';
 const avNew = '"av": ctx.globalOptions.pageID || ctx.userID,';
-const avCount = (lmq.split(avOld).length - 1);
-if (avCount > 0) {
+const occurrencesBefore = (lmq.split(avOld).length - 1);
+
+if (occurrencesBefore > 0) {
   lmq = lmq.split(avOld).join(avNew);
-  console.log('[patch-fca] listenMqtt.js: fixed av in', avCount, 'location(s)');
+  console.log(`[patch-fca] listenMqtt.js: fixed "av" in ${occurrencesBefore} location(s)`);
 } else {
-  console.log('[patch-fca] listenMqtt.js: av already patched');
+  console.log('[patch-fca] listenMqtt.js: "av" already patched');
 }
 
-// Fix resilient catch handler for getSeqId
-const OLD_CATCH = `      .catch((err) => {
+// ══════════════════════════════════════════════════════════════════
+// Patch 4: listenMqtt.js — REMOVE the "skip seqId on error" workaround.
+//
+// The old patch replaced the catch with "proceed without seqId" which
+// caused MQTT to start without lastSeqId → only presence events.
+// Now that Patch 3 fixes the av field, getSeqID will succeed, so
+// we restore the original error propagation behavior.
+// ══════════════════════════════════════════════════════════════════
+
+// If the bad patch is present, revert it to the original behavior
+const BAD_CATCH = `      .catch((err) => {
+        log.warn("getSeqId", "getSeqId failed, proceeding without seqId:", err && err.error || String(err));
+        listenMqtt(defaultFuncs, api, ctx, globalCallback);
+      });`;
+
+const GOOD_CATCH = `      .catch((err) => {
         log.error("getSeqId", err);
         if (utils.getType(err) == "Object" && err.error === "Not logged in") {
           ctx.loggedIn = false;
         }
         return globalCallback(err);
       });`;
-const NEW_CATCH = `      .catch((err) => {
-        log.warn("getSeqId", "getSeqId failed, proceeding without seqId:", err && err.error || String(err));
-        listenMqtt(defaultFuncs, api, ctx, globalCallback);
-      });`;
-if (lmq.includes(OLD_CATCH)) {
-  lmq = lmq.replace(OLD_CATCH, NEW_CATCH);
-  console.log('[patch-fca] listenMqtt.js: catch handler patched OK');
+
+if (lmq.includes(BAD_CATCH)) {
+  lmq = lmq.replace(BAD_CATCH, GOOD_CATCH);
+  console.log('[patch-fca] listenMqtt.js: reverted bad catch — getSeqId errors now propagate correctly');
 } else if (lmq.includes('proceeding without seqId')) {
-  console.log('[patch-fca] listenMqtt.js: catch already patched');
+  console.warn('[patch-fca] listenMqtt.js: bad catch found but string mismatch — check manually');
 } else {
-  console.warn('[patch-fca] listenMqtt.js: catch target not found');
+  console.log('[patch-fca] listenMqtt.js: catch is already correct (original behavior)');
 }
 
 fs.writeFileSync(listenPath, lmq);
+
 const avFixed = (lmq.match(/ctx\.globalOptions\.pageID \|\| ctx\.userID/g) || []).length;
-console.log('[patch-fca] listenMqtt.js: Done. av||userID in', avFixed, 'location(s)');
-console.log('[patch-fca] All patches complete.');
+console.log(`[patch-fca] listenMqtt.js: Done. av||userID in ${avFixed} location(s).`);
+console.log('[patch-fca] All patches complete. getSeqId will now fetch real lastSeqId → messages will be received.');
