@@ -4,8 +4,13 @@ import { FacebookGateway,
 import { createWebhookRouter }     from "./routes/webhook.route";
 import { httpErrorHandler,
          notFoundHandler }         from "./errors/handlers/HttpErrorHandler";
+import { MiraiTransport }          from "./facebook/mirai/MiraiTransport";
 
-export function createApp(gateway: FacebookGateway, groupHandlers: GroupHandlers = {}): Application {
+export function createApp(
+  gateway: FacebookGateway,
+  groupHandlers: GroupHandlers = {},
+  miraiTransport: MiraiTransport | null = null,
+): Application {
   const app = express();
 
   app.use(
@@ -16,7 +21,13 @@ export function createApp(gateway: FacebookGateway, groupHandlers: GroupHandlers
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
   app.get(["/health", "/api/health", "/api/healthz"], (_req, res) => {
-    res.status(200).json({ status: "ok", uptime: process.uptime() });
+    const mqttConnected = miraiTransport ? miraiTransport.getApi() !== null : null;
+    res.status(200).json({
+      status:    "ok",
+      uptime:    process.uptime(),
+      mqtt:      mqttConnected === null ? "unknown" : mqttConnected ? "connected" : "disconnected",
+      botUserId: miraiTransport?.getCurrentUserId() || null,
+    });
   });
 
   const webhookRouter = createWebhookRouter(gateway, groupHandlers);
