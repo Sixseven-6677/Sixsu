@@ -54,7 +54,7 @@ import {
   handleMessage,
 } from "./handlers/message.handler";
 import {
-  setGroupSender, handleMemberJoined, handleMemberLeft,
+  setGroupSender, setGroupBotUserId, handleMemberJoined, handleMemberLeft,
 } from "./handlers/group.handler";
 
 function buildBanMessage(entry: BanEntry): string {
@@ -187,6 +187,7 @@ async function bootstrap(): Promise<void> {
   }
 
   setGroupSender(sender);
+  setGroupBotUserId(botUserId);
 
   const normalizer  = new FacebookEventNormalizer();
   const connection  = new FacebookConnection();
@@ -337,3 +338,4 @@ bootstrap().catch((err: unknown) => {
   log.error("Fatal error during startup.", err);
   process.exit(1);
 });
+
