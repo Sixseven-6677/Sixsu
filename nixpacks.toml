@@ -1,9 +1,5 @@
-[phases.setup]
-nixPkgs = ["nodejs_20", "nodePackages_latest.pnpm"]
-cmds = ["npm install -g pnpm --prefer-offline 2>/dev/null || true"]
-
 [phases.install]
-cmds = ["pnpm install --no-frozen-lockfile", "node scripts/patch-fca.js", "pnpm run build"]
+cmds = ["npm install --no-audit"]
 
 [start]
 cmd = "node dist/index.js"
