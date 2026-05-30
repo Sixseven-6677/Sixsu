@@ -37,6 +37,7 @@ export class FcaEventAdapter {
    * Returns [] if the event should be ignored.
    */
   adapt(event: FcaEvent): MessagingEntry[] {
+    log.info("FcaEventAdapter: adapt called.", { type: event.type });
     switch (event.type) {
       case "message":
       case "message_reply":
@@ -46,7 +47,7 @@ export class FcaEventAdapter {
         return this.adaptGroupEvent(event as FcaGroupEvent);
 
       default:
-        log.debug("FcaEventAdapter: dropping non-actionable event.", {
+        log.info("FcaEventAdapter: dropping non-actionable event.", {
           type: event.type,
         });
         return [];
