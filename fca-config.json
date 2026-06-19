@@ -1,7 +1,6 @@
 {
   "autoUpdate": false,
   "mqtt": {
-    "enabled": true,
-    "reconnectInterval": 0
+    "enabled": true
   }
 }
