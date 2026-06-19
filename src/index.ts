@@ -288,9 +288,15 @@ async function bootstrap(): Promise<void> {
 
   const reconnect = new ReconnectManager(auth, sessionManager, {
     retry:                 { maxAttempts: 5, baseDelayMs: 2_000, maxDelayMs: 60_000 },
-    healthCheckIntervalMs: 30_000,
-    spamWindowMs:          60_000,
-    maxAttemptsPerWindow:  3,
+    // Increased from 30s → 5 minutes.
+    // 30s was too aggressive: during any brief MQTT reconnect window (api=null for
+    // 5–120s), the health monitor saw isConnected()=false and immediately triggered
+    // a full auth.login() → Facebook issued new cookies → old AppState invalidated.
+    // 5 minutes gives MiraiTransport's own retry loop time to self-recover before
+    // ReconnectManager escalates to a full credential refresh.
+    healthCheckIntervalMs: 300_000,
+    spamWindowMs:          120_000,
+    maxAttemptsPerWindow:  2,
   });
   bot.register(reconnect);
 
@@ -371,11 +377,21 @@ async function bootstrap(): Promise<void> {
       transports.map(({ label, transport }) => [label, transport])
     );
 
-    // Health check: report unhealthy when MQTT is disconnected (not just when
-    // credentials are missing — the old check never triggered because credentials
-    // stay loaded in AuthManager throughout the process lifetime).
+    // Health check: only report unhealthy when the transport has *stopped running*
+    // (permanent failure or max retries exceeded) — NOT when it is simply mid-reconnect.
+    //
+    // isConnected() === false during any brief MiraiTransport self-recovery window
+    // (api=null for 5-120s). Triggering ReconnectManager during that window causes a
+    // full auth.login() → Facebook issues new cookies → old AppState invalidated.
+    //
+    // isRunning() === false only after MiraiTransport explicitly gives up (appstate
+    // expired, or MAX_LOGIN_ATTEMPTS exhausted) — that is the right time to escalate.
     reconnect.setHealthCheck(async (accountId: string) => {
-      return transportMap.get(accountId)?.isConnected() ?? false;
+      const t = transportMap.get(accountId);
+      if (!t) return false;
+      // Healthy = transport is still running (self-recovery in progress counts as healthy)
+      // Unhealthy = transport permanently stopped (needs credential refresh)
+      return t.isRunning();
     });
 
     // Restart hook: after ReconnectManager refreshes credentials, also restart the

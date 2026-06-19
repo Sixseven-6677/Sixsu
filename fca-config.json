@@ -1,1 +1,7 @@
-{"autoUpdate":false,"mqtt":{"enabled":true,"reconnectInterval":3600}}
+{
+  "autoUpdate": false,
+  "mqtt": {
+    "enabled": true,
+    "reconnectInterval": 0
+  }
+}
