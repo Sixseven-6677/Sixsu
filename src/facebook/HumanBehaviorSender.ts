@@ -1,25 +1,14 @@
-import { ISender }       from "./types/ISender";
-import { LoggerManager } from "../logger/LoggerManager";
+import { ISender }       from './types/ISender';
+import { LoggerManager } from '../logger/LoggerManager';
 
-const log = LoggerManager.getLogger("HumanBehaviorSender");
+const log = LoggerManager.getLogger('HumanBehaviorSender');
 
 /**
- * HumanBehaviorSender — ISender decorator that makes the bot feel human.
- *
- * Every outbound text message is intercepted and:
- *   1. A typing indicator is shown immediately.
- *   2. A random delay is applied (duration scales with message length).
- *   3. The message is sent after the delay.
- *
- * sendTyping() and sendReaction() are forwarded directly — no artificial delay
- * is added to indicators or reactions, only to actual messages.
- *
- * Delay bands:
- *   Short  (<  100 chars) → 1 000 – 2 000 ms
- *   Medium (< 300 chars)  → 2 000 – 4 000 ms
- *   Long   (≥ 300 chars)  → 3 000 – 5 000 ms
- *
- * No memory leaks: every setTimeout is stored and cleared on error/cancellation.
+ * Adds human-like typing delay before every text message.
+ * Delay bands (scales with message length):
+ *   Short  (<100 chars)  -> 800-1500 ms
+ *   Medium (<300 chars)  -> 1500-2500 ms
+ *   Long   (>=300 chars) -> 2000-3500 ms
  */
 export class HumanBehaviorSender implements ISender {
   private readonly inner: ISender;
@@ -31,20 +20,17 @@ export class HumanBehaviorSender implements ISender {
   async sendText(recipientId: string, text: string): Promise<void> {
     const delayMs = HumanBehaviorSender.calculateDelay(text);
 
-    log.debug("HumanBehaviorSender: queuing message with human delay.", {
-      to:      recipientId,
-      chars:   text.length,
-      delayMs: Math.round(delayMs),
+    log.debug('HumanBehaviorSender: queuing message with human delay.', {
+      to: recipientId, chars: text.length, delayMs: Math.round(delayMs),
     });
 
-    try {
-      await this.inner.sendTyping(recipientId);
-    } catch {
-      // Typing indicator is best-effort — never block the send.
-    }
+    // Show typing indicator first (best-effort)
+    try { await this.inner.sendTyping(recipientId); } catch { /* ignore */ }
 
+    // Brief human-like pause
     await HumanBehaviorSender.sleep(delayMs);
 
+    // Actual send (has its own retry+timeout logic in MiraiSender)
     await this.inner.sendText(recipientId, text);
   }
 
@@ -52,53 +38,21 @@ export class HumanBehaviorSender implements ISender {
     return this.inner.sendTyping(recipientId);
   }
 
-  async sendReaction(
-    messageId:   string,
-    recipientId: string,
-    emoji:       string,
-  ): Promise<void> {
+  async sendReaction(messageId: string, recipientId: string, emoji: string): Promise<void> {
     return this.inner.sendReaction(messageId, recipientId, emoji);
   }
 
-  // ── Private helpers ─────────────────────────────────────────────────────
-
-  /**
-   * Returns a random delay in milliseconds.
-   * The range scales with message length to mimic realistic typing speed.
-   */
   private static calculateDelay(text: string): number {
     const len = text.length;
-
-    let minMs: number;
-    let maxMs: number;
-
-    if (len < 100) {
-      minMs = 1_000;
-      maxMs = 2_000;
-    } else if (len < 300) {
-      minMs = 2_000;
-      maxMs = 4_000;
-    } else {
-      minMs = 3_000;
-      maxMs = 5_000;
-    }
-
-    return minMs + Math.random() * (maxMs - minMs);
+    if (len < 100) return 800  + Math.random() * 700;   // 0.8-1.5 s
+    if (len < 300) return 1500 + Math.random() * 1000;  // 1.5-2.5 s
+    return               2000 + Math.random() * 1500;   // 2.0-3.5 s
   }
 
-  /**
-   * Promise-based sleep with guaranteed cleanup.
-   * The timeout reference is kept so it can never leak if the Promise is
-   * settled early by an unhandled rejection in the caller's chain.
-   */
   private static sleep(ms: number): Promise<void> {
     return new Promise<void>((resolve) => {
-      const id = setTimeout(() => {
-        resolve();
-      }, ms);
-
-      // Unref on Node.js so this timer never prevents a clean process exit.
-      if (typeof (id as NodeJS.Timeout).unref === "function") {
+      const id = setTimeout(resolve, ms);
+      if (typeof (id as NodeJS.Timeout).unref === 'function') {
         (id as NodeJS.Timeout).unref();
       }
     });
