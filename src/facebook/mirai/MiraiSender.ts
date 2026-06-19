@@ -1,17 +1,21 @@
-import { ISender }        from "../types/ISender";
-import { MiraiTransport } from "./MiraiTransport";
-import { LoggerManager }  from "../../logger/LoggerManager";
+import { ISender }        from '../types/ISender';
+import { MiraiTransport } from './MiraiTransport';
+import { LoggerManager }  from '../../logger/LoggerManager';
 
-const log = LoggerManager.getLogger("MiraiSender");
+const log = LoggerManager.getLogger('MiraiSender');
 
-/**
- * MiraiSender — ISender implementation backed by fca-unofficial.
- *
- * All outbound messages are sent through the live FcaApi managed by
- * MiraiTransport.  Using the same session for both listening and sending
- * avoids the cookie-conflict issues that arise when two different auth
- * mechanisms share one Facebook account.
- */
+const RETRYABLE_ERRORS = [
+  'client disconnecting',
+  'not connected',
+  'api not connected',
+  'facebook api not connected',
+];
+
+function isRetryable(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return RETRYABLE_ERRORS.some(e => msg.includes(e));
+}
+
 export class MiraiSender implements ISender {
   private readonly transport: MiraiTransport;
 
@@ -19,67 +23,95 @@ export class MiraiSender implements ISender {
     this.transport = transport;
   }
 
-  /** Send a plain-text message to a Messenger thread. */
-  async sendText(recipientId: string, text: string): Promise<void> {
-    const api = this.transport.getApi();
-    if (!api) {
-      log.warn("MiraiSender.sendText: API not ready — message dropped.", {
-        to: recipientId,
-      });
-      throw new Error("Facebook API not connected (MiraiTransport not logged in).");
+  /**
+   * Wait until the transport has a live API object, or until timeoutMs elapses.
+   * Returns the API if available, null on timeout.
+   */
+  private async waitForApi(timeoutMs = 15_000): Promise<ReturnType<MiraiTransport['getApi']>> {
+    const pollMs  = 500;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const api = this.transport.getApi();
+      if (api) return api;
+      await new Promise<void>(r => setTimeout(r, pollMs));
     }
-
-    log.debug("MiraiSender: sending text…", {
-      to:      recipientId,
-      chars:   text.length,
-      preview: text.slice(0, 60),
-    });
-
-    return new Promise<void>((resolve, reject) => {
-      api.sendMessage(text, recipientId, (err, info) => {
-        if (err) {
-          log.warn("MiraiSender: sendText failed.", {
-            to:    recipientId,
-            error: err.message,
-          });
-          reject(err);
-          return;
-        }
-
-        // ── [DEBUG-5] Reply sent successfully ───────────────────────────
-        log.info("MiraiSender: reply sent.", {
-          to:        recipientId,
-          messageID: info?.messageID,
-          chars:     text.length,
-        });
-
-        resolve();
-      });
-    });
+    return null;
   }
 
-  /**
-   * Send a typing indicator (best-effort, never throws).
-   *
-   * Wrapped in a Promise so the caller awaits the HTTP request completion
-   * before starting any delay — ensuring the '...' indicator is actually
-   * visible on Facebook before the message arrives.
-   *
-   * Previously called without a callback (fire-and-forget), which caused
-   * the typing indicator HTTP request and the message HTTP request to race
-   * each other, sometimes arriving simultaneously on the client side.
-   */
+  /** Send a plain-text message to a Messenger thread (with reconnect-retry). */
+  async sendText(recipientId: string, text: string): Promise<void> {
+    const MAX_ATTEMPTS = 3;
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // ── Wait for a live API (handles the case where MQTT just dropped) ──
+      let api = this.transport.getApi();
+      if (!api) {
+        log.warn('MiraiSender.sendText: API not ready — waiting for reconnect.', {
+          to: recipientId, attempt,
+        });
+        api = await this.waitForApi(15_000);
+        if (!api) {
+          log.warn('MiraiSender.sendText: timed out waiting for API — message dropped.', {
+            to: recipientId,
+          });
+          throw new Error('Facebook API not connected (MiraiTransport not logged in).');
+        }
+      }
+
+      log.debug('MiraiSender: sending text…', {
+        to:      recipientId,
+        chars:   text.length,
+        preview: text.slice(0, 60),
+        attempt,
+      });
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          api!.sendMessage(text, recipientId, (err, info) => {
+            if (err) {
+              log.warn('MiraiSender: sendText failed.', { to: recipientId, error: (err as Error).message, attempt });
+              reject(err);
+              return;
+            }
+            log.info('MiraiSender: reply sent.', {
+              to:        recipientId,
+              messageID: info?.messageID,
+              chars:     text.length,
+            });
+            resolve();
+          });
+        });
+        return; // success
+      } catch (err) {
+        lastErr = err;
+        if (isRetryable(err) && attempt < MAX_ATTEMPTS) {
+          const delayMs = attempt * 3_000;
+          log.warn(`MiraiSender: retryable error — waiting ${delayMs}ms before retry.`, {
+            to: recipientId, attempt, error: err instanceof Error ? err.message : String(err),
+          });
+          // Null out our local ref — force waitForApi on next loop iteration
+          await new Promise<void>(r => setTimeout(r, delayMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastErr;
+  }
+
   async sendTyping(recipientId: string): Promise<void> {
     const api = this.transport.getApi();
     if (!api) return;
 
-    log.debug("MiraiSender: sending typing indicator.", { to: recipientId });
+    log.debug('MiraiSender: sending typing indicator.', { to: recipientId });
 
     return new Promise<void>((resolve) => {
       try {
         api.sendTypingIndicator(recipientId, (err?: Error) => {
           if (err) {
-            log.warn("MiraiSender.sendTyping: indicator failed.", {
+            log.warn('MiraiSender.sendTyping: indicator failed.', {
               to:    recipientId,
               error: err.message,
             });
@@ -87,8 +119,7 @@ export class MiraiSender implements ISender {
           resolve();
         });
       } catch (e: unknown) {
-        // sendTypingIndicator is best-effort — log and continue, never block.
-        log.warn("MiraiSender.sendTyping: threw.", {
+        log.warn('MiraiSender.sendTyping: threw.', {
           to:    recipientId,
           error: e instanceof Error ? e.message : String(e),
         });
@@ -97,7 +128,6 @@ export class MiraiSender implements ISender {
     });
   }
 
-  /** Add an emoji reaction to a message (best-effort, never throws). */
   async sendReaction(
     messageId:    string,
     _recipientId: string,
@@ -106,7 +136,7 @@ export class MiraiSender implements ISender {
     const api = this.transport.getApi();
     if (!api) return;
 
-    log.debug("MiraiSender: setting reaction.", { messageId, emoji });
+    log.debug('MiraiSender: setting reaction.', { messageId, emoji });
 
     try {
       api.setMessageReaction(emoji, messageId, undefined, true);
