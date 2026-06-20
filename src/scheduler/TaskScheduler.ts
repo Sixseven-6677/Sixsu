@@ -34,7 +34,28 @@ export class TaskScheduler implements ISystem {
     return task;
   }
 
+  /**
+   * Schedule a recurring task.
+   *
+   * Idempotent by name: if an active task with the same name already exists,
+   * it is cancelled before the new one is registered. This prevents duplicate
+   * recurring tasks when a plugin is re-enabled after a reconnect.
+   */
   recur(options: RecurringTaskOptions): RecurringTask {
+    // Deduplication: cancel any existing active task with the same name.
+    const fullName = options.name;
+    for (const [, existing] of this.tasks) {
+      if (existing.name === fullName && existing.isActive()) {
+        log.info(
+          `TaskScheduler: task "${fullName}" already active — ` +
+          `cancelling [${existing.id}] before re-scheduling.`
+        );
+        existing.cancel();
+        this.tasks.delete(existing.id);
+        break;
+      }
+    }
+
     const task = new RecurringTask(options, () => this.evict(task.id));
     this.register(task);
     task.start();
@@ -73,10 +94,6 @@ export class TaskScheduler implements ISystem {
     };
   }
 
-  /**
-   * Called by tasks when they complete naturally (maxRuns reached / delayed task done).
-   * Removes the task from the registry so completed tasks don't accumulate.
-   */
   private evict(id: string): void {
     if (this.tasks.delete(id)) {
       log.info(`Task [${id}] completed and evicted from registry.`);
