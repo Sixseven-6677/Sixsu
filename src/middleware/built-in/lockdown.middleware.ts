@@ -1,40 +1,7 @@
-import fs   from "fs";
-import path from "path";
 import { IMiddleware }   from "../types/IMiddleware";
 import { LoggerManager } from "../../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("Middleware/Lockdown");
-
-// ─── File-based fallback ──────────────────────────────────────────────────────
-
-interface StoreData {
-  threads: Record<string, boolean>;
-}
-
-const DATA_PATH = path.resolve("data/lockdown.json");
-
-function loadFromFile(): StoreData {
-  try {
-    if (fs.existsSync(DATA_PATH)) {
-      return JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as StoreData;
-    }
-  } catch {
-    log.warn("LockdownStore: failed to load file — starting fresh.");
-  }
-  return { threads: {} };
-}
-
-function saveToFile(data: StoreData): void {
-  try {
-    const dir = path.dirname(DATA_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
-  } catch (err) {
-    log.warn("LockdownStore: failed to write file.", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
 
 // ─── MongoDB repo interface (loose coupling) ──────────────────────────────────
 
@@ -46,12 +13,11 @@ interface IGroupSettingsRepository {
 // ─── LockdownStore ────────────────────────────────────────────────────────────
 
 export class LockdownStore {
-  private data: StoreData;
+  private readonly threads = new Map<string, boolean>();
   private repo: IGroupSettingsRepository | null = null;
 
   constructor() {
-    this.data = loadFromFile();
-    log.info("LockdownStore initialized.", { lockedThreads: this.lockedCount });
+    log.info("LockdownStore initialized — no locked threads yet.");
   }
 
   // ── MongoDB wiring ──────────────────────────────────────────────────────────
@@ -66,11 +32,11 @@ export class LockdownStore {
     try {
       const lockedIds = await this.repo.getLockedThreadIds();
       for (const id of lockedIds) {
-        this.data.threads[id] = true;
+        this.threads.set(id, true);
       }
       log.info(`LockdownStore: loaded from MongoDB — ${lockedIds.length} locked thread(s).`);
     } catch (err) {
-      log.warn("LockdownStore: failed to load from MongoDB — using file data.", {
+      log.warn("LockdownStore: failed to load from MongoDB — starting empty.", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -79,7 +45,7 @@ export class LockdownStore {
   // ── Mutations ───────────────────────────────────────────────────────────────
 
   enable(threadId: string): void {
-    this.data.threads[threadId] = true;
+    this.threads.set(threadId, true);
 
     if (this.repo) {
       this.repo.setLockdown(threadId, true).catch((err: unknown) => {
@@ -87,17 +53,16 @@ export class LockdownStore {
           threadId,
           error: err instanceof Error ? err.message : String(err),
         });
-        saveToFile(this.data);
       });
     } else {
-      saveToFile(this.data);
+      log.debug("LockdownStore: no repo attached — lockdown active in memory only.", { threadId });
     }
 
     log.info("Lockdown enabled.", { threadId });
   }
 
   disable(threadId: string): void {
-    this.data.threads[threadId] = false;
+    this.threads.set(threadId, false);
 
     if (this.repo) {
       this.repo.setLockdown(threadId, false).catch((err: unknown) => {
@@ -105,10 +70,9 @@ export class LockdownStore {
           threadId,
           error: err instanceof Error ? err.message : String(err),
         });
-        saveToFile(this.data);
       });
     } else {
-      saveToFile(this.data);
+      log.debug("LockdownStore: no repo attached — lockdown disabled in memory only.", { threadId });
     }
 
     log.info("Lockdown disabled.", { threadId });
@@ -117,13 +81,15 @@ export class LockdownStore {
   // ── Queries ─────────────────────────────────────────────────────────────────
 
   isLocked(threadId: string): boolean {
-    return this.data.threads[threadId] === true;
+    return this.threads.get(threadId) === true;
   }
 
   getLockedThreads(): string[] {
-    return Object.entries(this.data.threads)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
+    const result: string[] = [];
+    for (const [id, locked] of this.threads) {
+      if (locked) result.push(id);
+    }
+    return result;
   }
 
   get lockedCount(): number {
