@@ -1,6 +1,7 @@
 import { ISystem }          from "../../core/interfaces/ISystem";
 import { FcaApi, FcaCookie, FcaEvent } from "./FcaTypes";
 import { LoggerManager }   from "../../logger/LoggerManager";
+import { diagnosticMonitor } from "../../diagnostic/DiagnosticMonitor";
 
 const log = LoggerManager.getLogger("MiraiTransport");
 
@@ -30,6 +31,41 @@ function isSessionExpiredError(msg: string): boolean {
   const lower = msg.toLowerCase();
   return SESSION_EXPIRED_HINTS.some(hint => lower.includes(hint.toLowerCase()));
 }
+
+// ─── Diagnostic API interceptor ───────────────────────────────────────────────
+
+/**
+ * Wraps an FcaApi object so every method call is counted by DiagnosticMonitor.
+ * Zero behaviour change — purely additive instrumentation.
+ */
+function wrapApiForDiagnostics(api: FcaApi, accountId: string): FcaApi {
+  const TRACKED: Array<keyof FcaApi> = [
+    "sendMessage", "sendTypingIndicator", "getThreadInfo", "getThreadList",
+    "setMessageReaction", "handleMessageRequest", "removeUserFromGroup",
+    "changeAdminStatus", "setTitle", "markAsRead", "markAsDelivered",
+    "getAppState", "listen", "logout",
+  ] as Array<keyof FcaApi>;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wrapped: any = Object.create(api as any);
+
+  for (const method of TRACKED) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const orig = (api as any)[method];
+    if (typeof orig === "function") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wrapped[method] = (...args: any[]) => {
+        diagnosticMonitor.recordApiCall(String(method), accountId);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (orig as any).apply(api, args);
+      };
+    }
+  }
+
+  return wrapped as FcaApi;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class MiraiTransport implements ISystem {
   /** Unique system name — configurable so multiple instances can coexist in Bot. */
@@ -219,6 +255,9 @@ export class MiraiTransport implements ISystem {
               `MiraiTransport [${this.name}]: AppState expired — stopping retries. [permanent-failure]`,
               { error: errMsg },
             );
+            // ── DIAG: AppState expired ─────────────────────────────────────
+            diagnosticMonitor.recordAppStateInvalid(this.name, errMsg);
+            // ──────────────────────────────────────────────────────────────
             this.running = false;
             this.lastDisconnectedAt = Date.now();
             resolved = true;
@@ -227,6 +266,12 @@ export class MiraiTransport implements ISystem {
             return;
           }
 
+          // ── DIAG: Login failed ─────────────────────────────────────────
+          diagnosticMonitor.recordLogin(this.name, false, {
+            error:   errMsg,
+            attempt: this.loginAttempts + 1,
+          });
+          // ──────────────────────────────────────────────────────────────
           log.warn(`MiraiTransport [${this.name}]: login failed.`, { error: errMsg });
           resolved = true;
           resolve();
@@ -234,11 +279,27 @@ export class MiraiTransport implements ISystem {
           return;
         }
 
-        this.api = api;
-        api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
+        // ── DIAG: Wrap API for call counting ───────────────────────────────
+        const wrappedApi = wrapApiForDiagnostics(api, this.name);
+        this.api = wrappedApi;
+        // ──────────────────────────────────────────────────────────────────
+
+        wrappedApi.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
         this.lastConnectedAt = Date.now();
         this.totalReconnects++;
+
+        // ── DIAG: Login success + AppState drift check ─────────────────────
+        const freshCookies   = api.getAppState();
+        const originalCount  = this.appState.length;
+        const freshCount     = freshCookies.length;
+        diagnosticMonitor.recordLogin(this.name, true, {
+          userId:      api.getCurrentUserID(),
+          cookieCount: originalCount,
+          attempt:     this.loginAttempts + 1,
+        });
+        diagnosticMonitor.recordAppStateCheck(this.name, originalCount, freshCount);
+        // ──────────────────────────────────────────────────────────────────
 
         log.info(`MiraiTransport [${this.name}]: logged in. [listener-start]`, {
           userId:          api.getCurrentUserID(),
@@ -259,6 +320,10 @@ export class MiraiTransport implements ISystem {
     log.info(`MiraiTransport [${this.name}]: starting MQTT listener…`);
     this.listenerStartMs = Date.now();
 
+    // ── DIAG: MQTT connect ────────────────────────────────────────────────
+    diagnosticMonitor.recordMqttConnect(this.name);
+    // ─────────────────────────────────────────────────────────────────────
+
     this.stopListenFn = this.api.listen((err, event) => {
       if (err) {
         const stableMs = Date.now() - this.listenerStartMs;
@@ -276,6 +341,10 @@ export class MiraiTransport implements ISystem {
         }
 
         this.lastDisconnectedAt = Date.now();
+
+        // ── DIAG: MQTT disconnect/error ───────────────────────────────────
+        diagnosticMonitor.recordMqttDisconnect(this.name, { errorCode: errCode, errorMsg: errMsg, stableMs });
+        // ─────────────────────────────────────────────────────────────────
 
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
           // FATAL Facebook error on the MQTT stream (e.g. 1357031 = session interrupted).
@@ -323,6 +392,12 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
+      // ── DIAG: Count incoming messages (proxy for autoMarkDelivered calls) ─
+      if ((event as Record<string, unknown>).type === "message") {
+        diagnosticMonitor.recordApiCall("autoMarkDelivered", this.name);
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       log.debug(`MiraiTransport [${this.name}]: raw event received.`, { type: event.type });
 
       try {
@@ -358,6 +433,10 @@ export class MiraiTransport implements ISystem {
     if (!this.running) return;
 
     this.loginAttempts++;
+
+    // ── DIAG: Reconnect attempt ───────────────────────────────────────────
+    diagnosticMonitor.recordReconnect(this.name, reason, this.loginAttempts);
+    // ─────────────────────────────────────────────────────────────────────
 
     if (this.loginAttempts > MiraiTransport.MAX_LOGIN_ATTEMPTS) {
       // ── Self-healing: signal permanent failure instead of silently zombifying ──
