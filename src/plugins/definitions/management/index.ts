@@ -702,6 +702,7 @@ class ManagementPlugin implements IPlugin {
         { savedThreads: 0 },
       );
     }
+  }
 
   // ─── onEnable: register commands + start self-healing watchdog ────────────
 
