@@ -36,15 +36,21 @@ function isSessionExpiredError(msg: string): boolean {
 
 /**
  * Wraps an FcaApi object so every method call is counted by DiagnosticMonitor.
+ * Uses string[] (not keyof FcaApi) so we can also track runtime methods that
+ * exist on the fca-unofficial object but aren't in our minimal FcaApi type.
  * Zero behaviour change — purely additive instrumentation.
  */
 function wrapApiForDiagnostics(api: FcaApi, accountId: string): FcaApi {
-  const TRACKED: Array<keyof FcaApi> = [
-    "sendMessage", "sendTypingIndicator", "getThreadInfo", "getThreadList",
-    "setMessageReaction", "handleMessageRequest", "removeUserFromGroup",
-    "changeAdminStatus", "setTitle", "markAsRead", "markAsDelivered",
-    "getAppState", "listen", "logout",
-  ] as Array<keyof FcaApi>;
+  // All methods we want to count. String array to avoid TS constraint on keyof FcaApi
+  // since fca-unofficial exposes more methods at runtime than our stub interface.
+  const TRACKED: string[] = [
+    "sendMessage", "sendTypingIndicator", "setMessageReaction", "getAppState",
+    "listen", "logout",
+    // Runtime methods not in the stub interface but called by plugins:
+    "getThreadList", "getThreadInfo", "setTitle",
+    "removeUserFromGroup", "changeAdminStatus", "handleMessageRequest",
+    "markAsRead", "markAsDelivered",
+  ];
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapped: any = Object.create(api as any);
@@ -55,7 +61,7 @@ function wrapApiForDiagnostics(api: FcaApi, accountId: string): FcaApi {
     if (typeof orig === "function") {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       wrapped[method] = (...args: any[]) => {
-        diagnosticMonitor.recordApiCall(String(method), accountId);
+        diagnosticMonitor.recordApiCall(method, accountId);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (orig as any).apply(api, args);
       };
@@ -255,9 +261,9 @@ export class MiraiTransport implements ISystem {
               `MiraiTransport [${this.name}]: AppState expired — stopping retries. [permanent-failure]`,
               { error: errMsg },
             );
-            // ── DIAG: AppState expired ─────────────────────────────────────
+            // ── DIAG ─────────────────────────────────────────────────────
             diagnosticMonitor.recordAppStateInvalid(this.name, errMsg);
-            // ──────────────────────────────────────────────────────────────
+            // ─────────────────────────────────────────────────────────────
             this.running = false;
             this.lastDisconnectedAt = Date.now();
             resolved = true;
@@ -266,12 +272,12 @@ export class MiraiTransport implements ISystem {
             return;
           }
 
-          // ── DIAG: Login failed ─────────────────────────────────────────
+          // ── DIAG ─────────────────────────────────────────────────────
           diagnosticMonitor.recordLogin(this.name, false, {
             error:   errMsg,
             attempt: this.loginAttempts + 1,
           });
-          // ──────────────────────────────────────────────────────────────
+          // ─────────────────────────────────────────────────────────────
           log.warn(`MiraiTransport [${this.name}]: login failed.`, { error: errMsg });
           resolved = true;
           resolve();
@@ -279,7 +285,7 @@ export class MiraiTransport implements ISystem {
           return;
         }
 
-        // ── DIAG: Wrap API for call counting ───────────────────────────────
+        // ── DIAG: Wrap API for call counting (zero behaviour change) ──────
         const wrappedApi = wrapApiForDiagnostics(api, this.name);
         this.api = wrappedApi;
         // ──────────────────────────────────────────────────────────────────
@@ -289,16 +295,14 @@ export class MiraiTransport implements ISystem {
         this.lastConnectedAt = Date.now();
         this.totalReconnects++;
 
-        // ── DIAG: Login success + AppState drift check ─────────────────────
-        const freshCookies   = api.getAppState();
-        const originalCount  = this.appState.length;
-        const freshCount     = freshCookies.length;
+        // ── DIAG: Login success + AppState drift check ────────────────────
+        const freshCookies  = api.getAppState();
         diagnosticMonitor.recordLogin(this.name, true, {
           userId:      api.getCurrentUserID(),
-          cookieCount: originalCount,
+          cookieCount: this.appState.length,
           attempt:     this.loginAttempts + 1,
         });
-        diagnosticMonitor.recordAppStateCheck(this.name, originalCount, freshCount);
+        diagnosticMonitor.recordAppStateCheck(this.name, this.appState.length, freshCookies.length);
         // ──────────────────────────────────────────────────────────────────
 
         log.info(`MiraiTransport [${this.name}]: logged in. [listener-start]`, {
@@ -342,7 +346,7 @@ export class MiraiTransport implements ISystem {
 
         this.lastDisconnectedAt = Date.now();
 
-        // ── DIAG: MQTT disconnect/error ───────────────────────────────────
+        // ── DIAG: MQTT disconnect ─────────────────────────────────────────
         diagnosticMonitor.recordMqttDisconnect(this.name, { errorCode: errCode, errorMsg: errMsg, stableMs });
         // ─────────────────────────────────────────────────────────────────
 
@@ -392,7 +396,7 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
-      // ── DIAG: Count incoming messages (proxy for autoMarkDelivered calls) ─
+      // ── DIAG: Count incoming messages (= autoMarkDelivered API calls) ───
       if ((event as Record<string, unknown>).type === "message") {
         diagnosticMonitor.recordApiCall("autoMarkDelivered", this.name);
       }
