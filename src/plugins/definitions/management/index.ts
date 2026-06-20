@@ -1,5 +1,3 @@
-import fs   from "fs";
-import path from "path";
 import { config }          from "../../../config/env";
 import { prefixStore }    from "../../../prefix/PrefixStore";
 import { IPlugin, PluginManifest } from "../../types/IPlugin";
@@ -80,64 +78,6 @@ interface IGroupSettingsRepository {
   }): Promise<unknown>;
 }
 
-// ─── File fallback ────────────────────────────────────────────────────────────
-
-const DATA_PATH = path.resolve("data/management-plugin.json");
-
-function loadFromFile(): ProtectionStore {
-  try {
-    if (fs.existsSync(DATA_PATH)) {
-      const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as ProtectionStore;
-      if (!raw.botNicknames) raw.botNicknames = {};
-      return raw;
-    }
-  } catch { /* corrupt — start fresh */ }
-  return { threads: {}, botNicknames: {} };
-}
-
-function persistToFile(data: ProtectionStore): void {
-  try {
-    const dir = path.dirname(DATA_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
-  } catch { /* best effort */ }
-}
-
-// ─── Persistent save ──────────────────────────────────────────────────────────
-
-function saveThreadState(
-  store:     ProtectionStore,
-  threadId:  string,
-  repo:      IGroupSettingsRepository | null,
-  log?:      { warn(msg: string, meta?: object): void },
-): void {
-  setProtectionStore(store);
-
-  const state   = store.threads[threadId];
-  const botNick = store.botNicknames[threadId] ?? "";
-
-  if (repo && state) {
-    repo.upsert(threadId, {
-      protectName:      state.protectName,
-      lockedName:       state.lockedName,
-      protectNicknames: state.protectNicknames,
-      nicknames:        state.nicknames,
-      botNickname:      botNick,
-    }).catch((err: unknown) => {
-      log?.warn("ManagementPlugin: MongoDB upsert failed — falling back to file.", {
-        threadId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      persistToFile(store);
-    });
-  } else {
-    persistToFile(store);
-  }
-}
-
-function flushAllToFile(store: ProtectionStore): void {
-  persistToFile(store);
-}
 
 // ─── MongoDB load with retry ───────────────────────────────────────────────────
 
@@ -748,36 +688,20 @@ class ManagementPlugin implements IPlugin {
       if (loaded) {
         this.store = loaded;
       } else {
-        // MongoDB failed after retries — try file as last resort
-        this.store = loadFromFile();
+        // MongoDB failed after all retries — start with empty protection state
+        this.store = { threads: {}, botNicknames: {} };
         ctx.logger.warn(
-          "ManagementPlugin: using file fallback for protection state. " +
-          "On Railway this file is ephemeral — set MONGODB_URI for reliability.",
-          {
-            savedThreads: Object.keys(this.store.threads).length,
-          },
+          "ManagementPlugin: MongoDB unavailable after retries — starting with empty state.",
+          { savedThreads: 0 },
         );
       }
     } else {
-      this.store = loadFromFile();
-      ctx.logger.info("ManagementPlugin: no MongoDB repo — loaded from file.", {
-        savedThreads: Object.keys(this.store.threads).length,
-      });
+      this.store = { threads: {}, botNicknames: {} };
+      ctx.logger.warn(
+        "ManagementPlugin: no MongoDB repo — starting with empty protection state.",
+        { savedThreads: 0 },
+      );
     }
-
-    setProtectionStore(this.store);
-
-    const summary = getProtectionSummary();
-    ctx.logger.info(
-      "ManagementPlugin loaded — ProtectionRegistry initialised. [protection-loaded]",
-      {
-        savedThreads:   summary.totalThreads,
-        protectedNames: summary.protectedNames,
-        protectedNicks: summary.protectedNicks,
-        storage:        this.repo ? "MongoDB" : "file",
-      },
-    );
-  }
 
   // ─── onEnable: register commands + start self-healing watchdog ────────────
 
@@ -943,8 +867,7 @@ class ManagementPlugin implements IPlugin {
       this.watchdogTimer = null;
       this.ctx.logger.info("ManagementPlugin: watchdog stopped. [watchdog-stop]");
     }
-    flushAllToFile(this.store);
-    this.ctx.logger.info("ManagementPlugin disabled — state flushed to file.");
+    this.ctx.logger.info("ManagementPlugin disabled.");
   }
 
   async onUnload(): Promise<void> {
@@ -952,7 +875,6 @@ class ManagementPlugin implements IPlugin {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
     }
-    flushAllToFile(this.store);
     this.ctx.logger.info("ManagementPlugin unloaded.");
   }
 }
