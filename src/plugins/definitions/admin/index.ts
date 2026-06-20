@@ -2,42 +2,16 @@ import { IPlugin, PluginManifest } from "../../types/IPlugin";
 import { IPluginContext }          from "../../types/IPluginContext";
 import { ICommand }                from "../../../commands/types/ICommand";
 import { Context }                 from "../../../context/Context";
+import {
+  fetchThreadInfo,
+  setAdminStatus,
+  type FcaThreadInfo as ThreadInfo,
+  type FcaThreadAdminEntry as ThreadAdminEntry,
+  type FcaThreadUserInfo as ThreadUserInfo,
+  type IFcaApiWithAdmin as IFcaApiAdmin,
+} from "../../../facebook/fcaHelpers";
 
 // ─── Extended FCA types (declared locally — no changes to FcaTypes.ts) ──────
-
-interface ThreadAdminEntry {
-  id: string;
-}
-
-interface ThreadUserInfo {
-  name:        string;
-  firstName?:  string;
-  isFriend?:   boolean;
-  gender?:     number;
-  type?:       string;
-}
-
-interface ThreadInfo {
-  threadID:       string;
-  participantIDs: string[];
-  adminIDs:       ThreadAdminEntry[];
-  name:           string;
-  isGroup:        boolean;
-  userInfo:       Record<string, ThreadUserInfo>;
-}
-
-interface IFcaApiAdmin {
-  getThreadInfo(
-    threadID: string,
-    callback: (err: Error | null, info: ThreadInfo) => void,
-  ): void;
-  changeAdminStatus(
-    threadID:    string,
-    userIDs:     string[],
-    adminStatus: boolean,
-    callback?:   (err: Error | null) => void,
-  ): void;
-}
 
 interface IMiraiTransportService {
   getApi(): IFcaApiAdmin | null;
@@ -51,29 +25,6 @@ function getApi(pluginCtx: IPluginContext): IFcaApiAdmin | null {
   const primary = pluginCtx.consumeService<IMiraiTransportService>("mirai-transport")?.getApi?.() ?? null;
   if (primary) return primary;
   return pluginCtx.consumeService<IMiraiTransportService>("mirai-transport-secondary")?.getApi?.() ?? null;
-}
-
-function fetchThreadInfo(api: IFcaApiAdmin, threadID: string): Promise<ThreadInfo> {
-  return new Promise((resolve, reject) => {
-    api.getThreadInfo(threadID, (err, info) => {
-      if (err) reject(err);
-      else     resolve(info);
-    });
-  });
-}
-
-function setAdminStatus(
-  api:      IFcaApiAdmin,
-  threadID: string,
-  userIDs:  string[],
-  isAdmin:  boolean,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    api.changeAdminStatus(threadID, userIDs, isAdmin, (err) => {
-      if (err) reject(err);
-      else     resolve();
-    });
-  });
 }
 
 /** Resolve a list-position (1-based) or raw FB ID from a string arg. */
