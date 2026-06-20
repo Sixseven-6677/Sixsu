@@ -27,37 +27,39 @@ const FALLBACK_USER = (id: string): ContextUser => ({
 });
 
 export class ContextBuilder {
-  private readonly sender:  ISender;
-  private userService?:     IUserService;
-  private ownerIds:         Set<string> = new Set();
-  private adminStore?:      { has(id: string): boolean };
+  private readonly sender:     ISender;
+  private readonly ownerIds:   Set<string>;
+  private readonly adminStore: { has(id: string): boolean };
+  private userService?:        IUserService;
 
-  constructor(sender: ISender, userService?: IUserService) {
+  /**
+   * @param sender      The ISender used to reply to messages.
+   * @param ownerIds    User IDs that always get role "owner". Required at
+   *                    construction time so no message is ever processed without
+   *                    the correct owner list.
+   * @param adminStore  Live AdminStore reference. Required at construction time
+   *                    so ctx.hasRole("admin") always reflects dynamic admins.
+   * @param userService Optional UserService — can be injected later via
+   *                    setUserService() if the service is not available yet
+   *                    when the gateway is constructed.
+   */
+  constructor(
+    sender:      ISender,
+    ownerIds:    string[],
+    adminStore:  { has(id: string): boolean },
+    userService?: IUserService,
+  ) {
     this.sender      = sender;
+    this.ownerIds    = new Set(ownerIds);
+    this.adminStore  = adminStore;
     this.userService = userService;
+
+    log.info(`ContextBuilder: created with ${ownerIds.length} owner(s).`);
   }
 
   /** Inject (or replace) the UserService after construction. */
   setUserService(svc: IUserService): void {
     this.userService = svc;
-  }
-
-  /** Set the owner IDs — these users always get role "owner" regardless of DB. */
-  setOwnerIds(ids: string[]): void {
-    this.ownerIds = new Set(ids);
-    log.info(`ContextBuilder: ownerIds set — ${ids.length} owner(s).`);
-  }
-
-  /**
-   * Set the AdminStore reference.
-   * Users in this store always get at least role "admin" in every Context,
-   * regardless of what the DB returns — mirroring the owner override pattern.
-   * This is the critical fix: ctx.hasRole("admin") now reflects the live
-   * AdminStore, not just the potentially-stale MongoDB role.
-   */
-  setAdminStore(store: { has(id: string): boolean }): void {
-    this.adminStore = store;
-    log.debug("ContextBuilder: adminStore attached.");
   }
 
   /**
@@ -67,9 +69,6 @@ export class ContextBuilder {
    * user lookup = event.senderFbId ?? event.senderId
    *   In group chats (FCA), senderFbId is the real Facebook user ID while
    *   senderId carries the threadID for routing. In DMs they are the same.
-   *
-   * On any error the builder falls back to a minimal user object so the
-   * message is never silently dropped.
    */
   async build(event: FBMessageEvent | FBPostbackEvent): Promise<Context> {
 
@@ -81,21 +80,21 @@ export class ContextBuilder {
     const userLookupId = event.senderFbId ?? event.senderId;
 
     log.debug("Building context.", {
-      threadId:    event.senderId,
+      threadId:       event.senderId,
       userLookupId,
-      eventType:   event.type,
+      eventType:      event.type,
       hasUserService: Boolean(this.userService),
     });
 
     // ── User resolution ───────────────────────────────────────────────────
     let user:   ContextUser = FALLBACK_USER(userLookupId);
-    let source: "db" | "cache" | "fallback" = "fallback";
+    let source: "db" | "fallback" = "fallback";
 
     if (this.userService) {
       try {
         log.debug("UserService.findOrCreate — start.", { fbId: userLookupId });
-        const t0     = Date.now();
-        const record = await this.userService.findOrCreate(userLookupId);
+        const t0       = Date.now();
+        const record   = await this.userService.findOrCreate(userLookupId);
         const lookupMs = Date.now() - t0;
 
         user = {
@@ -125,32 +124,22 @@ export class ContextBuilder {
         });
       }
     } else {
-      log.debug("No UserService injected — using fallback user.", {
-        fbId: userLookupId,
-      });
+      log.debug("No UserService injected — using fallback user.", { fbId: userLookupId });
     }
 
     // ── Owner override ────────────────────────────────────────────────────
-    // If the user's ID is in ownerIds, force role to "owner" regardless of DB.
-    // NOTE: no guard on current role — owners must always win, even over DB "admin".
     if (this.ownerIds.has(userLookupId)) {
-      log.debug(`ContextBuilder: user ${userLookupId} is in ownerIds — elevating role to owner.`);
+      log.debug(`ContextBuilder: user ${userLookupId} in ownerIds — elevating to owner.`);
       user = { ...user, role: "owner" };
     }
 
     // ── Admin store override ──────────────────────────────────────────────
-    // If the user is in the live AdminStore and not already "owner",
-    // elevate the role to "admin". This is the single fix that makes
-    // ctx.hasRole("admin") work for all dynamically-added bot admins,
-    // even when MongoDB is unavailable or the cached DB role is stale.
     if (
-      this.adminStore?.has(userLookupId) &&
+      this.adminStore.has(userLookupId) &&
       user.role !== "owner" &&
       user.role !== "admin"
     ) {
-      log.debug(
-        `ContextBuilder: user ${userLookupId} is in AdminStore — elevating role to admin.`
-      );
+      log.debug(`ContextBuilder: user ${userLookupId} in AdminStore — elevating to admin.`);
       user = { ...user, role: "admin" };
     }
 
@@ -166,11 +155,7 @@ export class ContextBuilder {
     return new Context(user, thread, message, this.sender);
   }
 
-  // ── Private helpers ───────────────────────────────────────────────────
-
-  private buildMessage(
-    event: FBMessageEvent | FBPostbackEvent
-  ): ContextMessage {
+  private buildMessage(event: FBMessageEvent | FBPostbackEvent): ContextMessage {
     if (event.type === "postback") {
       return {
         id:              `postback-${event.timestamp}`,
