@@ -5,6 +5,7 @@ import { FacebookEventNormalizer } from "./FacebookEventNormalizer";
 import { ISender }                 from "./types/ISender";
 import { ContextBuilder }          from "../context/ContextBuilder";
 import { Context }                 from "../context/Context";
+import type { IUserService }       from "../users/types/IUserService";
 import {
   FBMemberJoinedEvent,
   FBMemberLeftEvent,
@@ -16,9 +17,9 @@ import { LoggerManager }           from "../logger/LoggerManager";
 const log = LoggerManager.getLogger("FacebookGateway");
 
 export type MessageHandler         = (ctx: Context) => Promise<void>;
-export type MemberJoinedHandler    = (event: FBMemberJoinedEvent)   => Promise<void>;
-export type MemberLeftHandler      = (event: FBMemberLeftEvent)     => Promise<void>;
-export type NameChangedHandler     = (event: FBNameChangedEvent)    => Promise<void>;
+export type MemberJoinedHandler    = (event: FBMemberJoinedEvent)    => Promise<void>;
+export type MemberLeftHandler      = (event: FBMemberLeftEvent)      => Promise<void>;
+export type NameChangedHandler     = (event: FBNameChangedEvent)     => Promise<void>;
 export type NicknameChangedHandler = (event: FBNicknameChangedEvent) => Promise<void>;
 
 export interface GroupHandlers {
@@ -33,18 +34,33 @@ export class FacebookGateway {
   private readonly normalizer:     FacebookEventNormalizer;
   private readonly contextBuilder: ContextBuilder;
 
+  /**
+   * @param connection  FacebookConnection instance.
+   * @param sender      ISender for outgoing messages.
+   * @param normalizer  Event normalizer.
+   * @param ownerIds    Owner user IDs — passed to ContextBuilder at construction
+   *                    time so no message is ever processed without the owner list.
+   * @param adminStore  Live AdminStore reference — passed to ContextBuilder so
+   *                    ctx.hasRole("admin") always reflects dynamic admins.
+   * @param userService Optional UserService — can be injected later via
+   *                    setUserService() if not available at gateway creation.
+   */
   constructor(
-    connection: FacebookConnection,
-    sender:     ISender,
-    normalizer: FacebookEventNormalizer
+    connection:   FacebookConnection,
+    sender:       ISender,
+    normalizer:   FacebookEventNormalizer,
+    ownerIds:     string[]                       = [],
+    adminStore:   { has(id: string): boolean }   = { has: () => false },
+    userService?: IUserService,
   ) {
     this.connection     = connection;
     this.normalizer     = normalizer;
-    this.contextBuilder = new ContextBuilder(sender);
+    this.contextBuilder = new ContextBuilder(sender, ownerIds, adminStore, userService);
   }
 
-  getContextBuilder(): ContextBuilder {
-    return this.contextBuilder;
+  /** Inject UserService after construction (e.g. when DB is ready). */
+  setUserService(svc: IUserService): void {
+    this.contextBuilder.setUserService(svc);
   }
 
   handleVerification(req: Request, res: Response): void {
