@@ -2,18 +2,15 @@ import fs   from "fs";
 import path from "path";
 import { LoggerManager } from "../logger/LoggerManager";
 
+// ── Normal top-level model imports (no lazy require needed — models have no
+//    transitive dependency back to migration.ts, so there is no circular dep).
+import { BotConfigModel }     from "./models/bot-config.model";
+import { BlackConfigModel }   from "./models/black-config.model";
+import { BotAdminModel }      from "./models/botadmin.model";
+import { GroupSettingsModel } from "./models/group-settings.model";
+import { BanModel }           from "./models/ban.model";
+
 const log = LoggerManager.getLogger("Migration");
-
-// ─── Lazy model imports (avoid circular deps at startup) ─────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const getModels = () => ({
-  BotConfigModel:    require("./models/bot-config.model").BotConfigModel    as import("./models/bot-config.model").BotConfigDocument extends { save(): unknown } ? typeof import("./models/bot-config.model").BotConfigModel : never,
-  BlackConfigModel:  require("./models/black-config.model").BlackConfigModel as typeof import("./models/black-config.model").BlackConfigModel,
-  BotAdminModel:     require("./models/botadmin.model").BotAdminModel        as typeof import("./models/botadmin.model").BotAdminModel,
-  GroupSettingsModel:require("./models/group-settings.model").GroupSettingsModel as typeof import("./models/group-settings.model").GroupSettingsModel,
-  BanModel:          require("./models/ban.model").BanModel                  as typeof import("./models/ban.model").BanModel,
-});
 
 // ─── Flag file ────────────────────────────────────────────────────────────────
 
@@ -33,7 +30,7 @@ function markDone(): void {
 
 // ─── Per-collection migrations ────────────────────────────────────────────────
 
-async function migratePrefix(BotConfigModel: ReturnType<typeof getModels>["BotConfigModel"]): Promise<number> {
+async function migratePrefix(): Promise<number> {
   const src = path.resolve("data/prefix.json");
   if (!fs.existsSync(src)) return 0;
 
@@ -42,9 +39,7 @@ async function migratePrefix(BotConfigModel: ReturnType<typeof getModels>["BotCo
     const raw  = JSON.parse(fs.readFileSync(src, "utf8")) as { prefix?: string };
     const pref = raw.prefix;
     if (pref && pref.length > 0) {
-      await (BotConfigModel as unknown as {
-        findOneAndUpdate(f: unknown, u: unknown, o: unknown): { exec(): Promise<unknown> }
-      }).findOneAndUpdate(
+      await BotConfigModel.findOneAndUpdate(
         { key: "prefix" },
         { $set: { value: pref, updatedAt: new Date() }, $setOnInsert: { key: "prefix" } },
         { upsert: true }
@@ -58,7 +53,7 @@ async function migratePrefix(BotConfigModel: ReturnType<typeof getModels>["BotCo
   return count;
 }
 
-async function migrateBlack(BlackConfigModel: ReturnType<typeof getModels>["BlackConfigModel"]): Promise<number> {
+async function migrateBlack(): Promise<number> {
   const src = path.resolve("data/black-plugin.json");
   if (!fs.existsSync(src)) return 0;
 
@@ -92,13 +87,13 @@ async function migrateBlack(BlackConfigModel: ReturnType<typeof getModels>["Blac
   return count;
 }
 
-async function migrateAdmins(BotAdminModel: ReturnType<typeof getModels>["BotAdminModel"]): Promise<number> {
+async function migrateAdmins(): Promise<number> {
   const src = path.resolve("data/admin-store.json");
   if (!fs.existsSync(src)) return 0;
 
   let count = 0;
   try {
-    const raw  = JSON.parse(fs.readFileSync(src, "utf8")) as { admins?: string[] };
+    const raw = JSON.parse(fs.readFileSync(src, "utf8")) as { admins?: string[] };
     for (const fbId of (raw.admins ?? [])) {
       await BotAdminModel.findOneAndUpdate(
         { fbId },
@@ -114,7 +109,7 @@ async function migrateAdmins(BotAdminModel: ReturnType<typeof getModels>["BotAdm
   return count;
 }
 
-async function migrateLockdown(GroupSettingsModel: ReturnType<typeof getModels>["GroupSettingsModel"]): Promise<number> {
+async function migrateLockdown(): Promise<number> {
   const src = path.resolve("data/lockdown.json");
   if (!fs.existsSync(src)) return 0;
 
@@ -139,7 +134,7 @@ async function migrateLockdown(GroupSettingsModel: ReturnType<typeof getModels>[
   return count;
 }
 
-async function migrateBans(BanModel: ReturnType<typeof getModels>["BanModel"]): Promise<number> {
+async function migrateBans(): Promise<number> {
   const src = path.resolve("data/bans.json");
   if (!fs.existsSync(src)) return 0;
 
@@ -183,7 +178,7 @@ export async function runMigrationIfNeeded(): Promise<void> {
     return;
   }
 
-  const dataDir = path.resolve("data");
+  const dataDir    = path.resolve("data");
   const hasAnyJson = fs.existsSync(dataDir) &&
     fs.readdirSync(dataDir).some((f) => f.endsWith(".json"));
 
@@ -195,14 +190,12 @@ export async function runMigrationIfNeeded(): Promise<void> {
 
   log.info("Migration: JSON data found — starting import to MongoDB...");
 
-  const { BotConfigModel, BlackConfigModel, BotAdminModel, GroupSettingsModel, BanModel } = getModels();
-
   const results = await Promise.all([
-    migratePrefix(BotConfigModel as unknown as Parameters<typeof migratePrefix>[0]),
-    migrateBlack(BlackConfigModel),
-    migrateAdmins(BotAdminModel),
-    migrateLockdown(GroupSettingsModel),
-    migrateBans(BanModel),
+    migratePrefix(),
+    migrateBlack(),
+    migrateAdmins(),
+    migrateLockdown(),
+    migrateBans(),
   ]);
 
   const total = results.reduce((s, n) => s + n, 0);
