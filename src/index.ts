@@ -1,5 +1,4 @@
 // Polyfill: MongoDB driver requires globalThis.crypto (Node 18+).
-// This ensures compatibility on all Railway Node versions.
 if (typeof globalThis.crypto === "undefined") {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeCrypto = require("crypto");
@@ -31,9 +30,6 @@ import { createWebhookRouter }               from "./routes/webhook.route";
 import { httpErrorHandler, notFoundHandler }  from "./errors/handlers/HttpErrorHandler";
 import { Bot }                               from "./core/Bot";
 import { FacebookConnection }                from "./facebook/FacebookConnection";
-import { FacebookSender }                    from "./facebook/FacebookSender";
-import { FacebookClient }                    from "./facebook/FacebookClient";
-import { CookieHttpClient }                  from "./facebook/cookie/CookieHttpClient";
 import { MiraiTransport }                    from "./facebook/mirai/MiraiTransport";
 import { MiraiSender }                       from "./facebook/mirai/MiraiSender";
 import { HumanBehaviorSender }               from "./facebook/HumanBehaviorSender";
@@ -45,7 +41,7 @@ import { CommandRegistry }                   from "./commands/CommandRegistry";
 import { CommandLoader }                     from "./commands/CommandLoader";
 import { CommandPipeline }                   from "./commands/CommandPipeline";
 import { typingMiddleware }                  from "./commands/middleware/typing.middleware";
-import { groupMuteMiddleware }                from "./commands/middleware/groupmute.middleware";
+import { groupMuteMiddleware }               from "./commands/middleware/groupmute.middleware";
 import { MiddlewareManager }                 from "./middleware/MiddlewareManager";
 import { createLoggingMiddleware }           from "./middleware/built-in/logging.middleware";
 import { createCooldownMiddleware }          from "./middleware/built-in/cooldown.middleware";
@@ -75,18 +71,16 @@ import { SessionStore }                      from "./facebook/session/SessionSto
 import { ReconnectManager }                  from "./facebook/reconnect/ReconnectManager";
 import { ProcessErrorHandler }               from "./errors/handlers/ProcessErrorHandler";
 import { PluginManager }                     from "./plugins/PluginManager";
-import { prefixStore }                      from "./prefix/PrefixStore";
+import { prefixStore }                       from "./prefix/PrefixStore";
 import { AuthCredentials }                   from "./facebook/auth/types/IAuth";
-import {
-  setCommandPipeline, setCommandRegistry, setTaskScheduler,
-  setReconnectManager, setBanStore, setUserService,
-  handleMessage,
-} from "./handlers/message.handler";
+import { createMessageHandler, handleMessage } from "./handlers/message.handler";
 import {
   setGroupSender, setGroupBotUserId, setGroupApiGetter,
   handleMemberJoined, handleMemberLeft,
   handleNameChanged, handleNicknameChanged,
 } from "./handlers/group.handler";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildBanMessage(entry: BanEntry): string {
   const expiry = entry.expiresAt
@@ -102,6 +96,20 @@ function buildBanMessage(entry: BanEntry): string {
 function isValidMongoUri(uri: string): boolean {
   return (uri.startsWith("mongodb://") && uri.length > 10) ||
          (uri.startsWith("mongodb+srv://") && uri.length > 14);
+}
+
+/**
+ * Extracts the Facebook user ID from an FCA app-state cookie array.
+ * The app-state is an array of cookie objects; the `c_user` cookie holds the
+ * numeric Facebook user ID. Returns an empty string when not found.
+ */
+function getUserIdFromAppState(appState: unknown): string {
+  try {
+    const cookies = appState as Array<{ name: string; value: string }>;
+    return cookies.find((c) => c.name === "c_user")?.value ?? "";
+  } catch {
+    return "";
+  }
 }
 
 // ─── Per-account setup ────────────────────────────────────────────────────────
@@ -122,13 +130,12 @@ interface AccountSetupOptions {
 function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
   const { label, credentials, userSvc, adminStore, bot, isPrimary, startupDelayMs = 0 } = opts;
 
-  const cookieClient = new CookieHttpClient(credentials.appState);
-  const botUserId    = cookieClient.getUserId();
+  // Extract the bot's Facebook user ID directly from the app-state cookie array.
+  // c_user cookie holds the numeric FB user ID — same approach as the former CookieHttpClient.
+  const botUserId  = getUserIdFromAppState(credentials.appState);
+  const systemName = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
 
-  const systemName   = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
-
-  // Pass startupDelayMs so secondary accounts stagger their login attempts.
-  const transport    = new MiraiTransport(credentials.appState, systemName, startupDelayMs);
+  const transport       = new MiraiTransport(credentials.appState, systemName, startupDelayMs);
   const sender: ISender = new HumanBehaviorSender(new MiraiSender(transport));
 
   log.info(`Account [${label}]: transport created.`, { botUserId, systemName, startupDelayMs });
@@ -140,20 +147,26 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
     setGroupApiGetter(() => transport.getApi() as any);
   }
 
-  const normalizer  = new FacebookEventNormalizer();
-  const connection  = new FacebookConnection();
-  const gateway     = new FacebookGateway(connection, sender, normalizer);
-  connection.connect();
+  const normalizer = new FacebookEventNormalizer();
+  const connection = new FacebookConnection();
 
-  gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
-  gateway.getContextBuilder().setUserService(userSvc);
-  gateway.getContextBuilder().setAdminStore(adminStore);
+  // ownerIds + adminStore + userService are required at construction time so
+  // no message is processed before roles are configured.
+  const gateway = new FacebookGateway(
+    connection,
+    sender,
+    normalizer,
+    config.bot.ownerIds,
+    adminStore,
+    userSvc,
+  );
+  connection.connect();
 
   const adapter = new FcaEventAdapter(botUserId);
 
-  // Capture the account-specific sender and API getter in closures so group
-  // events (member joined/left, name/nickname changes) are processed through
-  // the correct account rather than always falling back to the primary account.
+  // Capture per-account sender and API getter in closures so group events
+  // (member joined/left, name/nickname changes) are processed through the
+  // correct account rather than always falling back to the primary account.
   const accountSender    = sender;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const accountApiGetter = (): any => transport.getApi();
@@ -172,13 +185,8 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
         },
         handleMessage,
         {
-          // Pass per-account sender so secondary account's group events
-          // are delivered via the secondary account, not via primary.
           onMemberJoined:    (evt) => handleMemberJoined(evt, accountSender),
           onMemberLeft:      (evt) => handleMemberLeft(evt, accountSender),
-          // Pass per-account API getter so name/nickname protection reverts
-          // (setTitle / changeNickname) are executed through the account that
-          // actually received the event — not always the primary account.
           onNameChanged:     (evt) => handleNameChanged(evt, accountApiGetter),
           onNicknameChanged: (evt) => handleNicknameChanged(evt, accountApiGetter),
         },
@@ -233,7 +241,7 @@ async function bootstrap(): Promise<void> {
   const cache = new CacheManager({ provider: await createCacheProvider() });
   bot.register(cache);
 
-  const mongoUri    = config.database.mongoUri;
+  const mongoUri     = config.database.mongoUri;
   const mongoEnabled = isValidMongoUri(mongoUri);
 
   if (mongoEnabled) {
@@ -288,33 +296,27 @@ async function bootstrap(): Promise<void> {
 
   const reconnect = new ReconnectManager(auth, sessionManager, {
     retry:                 { maxAttempts: 5, baseDelayMs: 2_000, maxDelayMs: 60_000 },
-    // Increased from 30s → 5 minutes.
-    // 30s was too aggressive: during any brief MQTT reconnect window (api=null for
-    // 5–120s), the health monitor saw isConnected()=false and immediately triggered
-    // a full auth.login() → Facebook issued new cookies → old AppState invalidated.
-    // 5 minutes gives MiraiTransport's own retry loop time to self-recover before
-    // ReconnectManager escalates to a full credential refresh.
     healthCheckIntervalMs: 300_000,
     spamWindowMs:          120_000,
     maxAttemptsPerWindow:  2,
   });
   bot.register(reconnect);
 
-  // 4. User system
-  const userRepo = new UserRepository();
-  const userSvc  = new UserService(userRepo, cache.store("users"));
-  setUserService(userSvc);
-
-  // 5. Commands & middleware
-  const registry    = new CommandRegistry();
-  const loader      = new CommandLoader(registry);
-  await loader.load(path.resolve(config.bot.commandsDir));
-  loader.watch(path.resolve(config.bot.commandsDir));
-
+  // 4. Stores + admin list
   const banStore      = new BanStore();
   const lockdownStore = new LockdownStore();
   const adminStore    = new AdminStore(config.bot.adminIds);
   log.info("AdminStore ready.", { adminCount: adminStore.size() });
+
+  // 5. User system
+  const userRepo = new UserRepository();
+  const userSvc  = new UserService(userRepo, cache.store("users"));
+
+  // 6. Commands & middleware
+  const registry = new CommandRegistry();
+  const loader   = new CommandLoader(registry);
+  await loader.load(path.resolve(config.bot.commandsDir));
+  loader.watch(path.resolve(config.bot.commandsDir));
 
   const mwManager = new MiddlewareManager()
     .register(createBannedMiddleware({ store: banStore, message: buildBanMessage }))
@@ -328,7 +330,7 @@ async function bootstrap(): Promise<void> {
     .use(mwManager.fn("banned"))
     .use(mwManager.fn("logging"))
     .use(mwManager.fn("lockdown"))
-    .use(groupMuteMiddleware)           // block commands from muted groups
+    .use(groupMuteMiddleware)
     .use(mwManager.fn("antispam"))
     .use(mwManager.fn("cooldown"))
     .use(mwManager.fn("permissions"))
@@ -337,13 +339,11 @@ async function bootstrap(): Promise<void> {
       await ctx.reply(`❓ الأمر "${ctx.commandName}" غير موجود.`);
     });
 
-  setCommandPipeline(pipeline);
-  setCommandRegistry(registry);
-  setTaskScheduler(scheduler);
-  setReconnectManager(reconnect);
-  setBanStore(banStore);
+  // Wire all message handler dependencies through the class constructor.
+  // handleMessage (exported from the module) calls the singleton created here.
+  createMessageHandler(pipeline, registry, scheduler, reconnect, banStore, userSvc);
 
-  // 6. FCA accounts — each gets its own transport + sender + gateway
+  // 7. FCA accounts — each gets its own transport + sender + gateway
   const primaryCreds   = auth.getCredentials("primary");
   const secondaryCreds = auth.getCredentials("secondary");
 
@@ -351,7 +351,7 @@ async function bootstrap(): Promise<void> {
     const t = bootFcaAccount({
       label: "primary", credentials: primaryCreds,
       userSvc, adminStore, bot, isPrimary: true,
-      startupDelayMs: 0,  // Primary logs in immediately
+      startupDelayMs: 0,
     });
     transports.push({ label: "primary", transport: t });
   }
@@ -360,42 +360,34 @@ async function bootstrap(): Promise<void> {
     const t = bootFcaAccount({
       label: "secondary", credentials: secondaryCreds,
       userSvc, adminStore, bot, isPrimary: false,
-      // 5-second stagger: prevents Facebook rate-limits and transient MQTT
-      // interference (error 1357031) that occurs when two accounts log in
-      // from the same IP address in rapid succession.
       startupDelayMs: 5_000,
     });
     transports.push({ label: "secondary", transport: t });
     log.info("✅ Two accounts active — bot running on primary + secondary Facebook accounts.");
   }
 
-  // Wire ReconnectManager to actually monitor MQTT connectivity (not just credentials)
-  // and to restart the transport when credentials are refreshed.
-  // Must be done after transports are created so the map is populated.
+  if (!primaryCreds && !secondaryCreds) {
+    log.warn("No FB_APPSTATE set — health-only mode. Bot cannot send or receive messages.");
+    const noOp: ISender = {
+      sendText:     async () => { log.warn("NoOpSender: no FB_APPSTATE configured."); },
+      sendTyping:   async () => {},
+      sendReaction: async () => {},
+    };
+    setGroupSender(new HumanBehaviorSender(noOp));
+  }
+
+  // Wire ReconnectManager to monitor MQTT connectivity and restart transports.
   if (transports.length > 0) {
     const transportMap = new Map<string, MiraiTransport>(
       transports.map(({ label, transport }) => [label, transport])
     );
 
-    // Health check: only report unhealthy when the transport has *stopped running*
-    // (permanent failure or max retries exceeded) — NOT when it is simply mid-reconnect.
-    //
-    // isConnected() === false during any brief MiraiTransport self-recovery window
-    // (api=null for 5-120s). Triggering ReconnectManager during that window causes a
-    // full auth.login() → Facebook issues new cookies → old AppState invalidated.
-    //
-    // isRunning() === false only after MiraiTransport explicitly gives up (appstate
-    // expired, or MAX_LOGIN_ATTEMPTS exhausted) — that is the right time to escalate.
     reconnect.setHealthCheck(async (accountId: string) => {
       const t = transportMap.get(accountId);
       if (!t) return false;
-      // Healthy = transport is still running (self-recovery in progress counts as healthy)
-      // Unhealthy = transport permanently stopped (needs credential refresh)
       return t.isRunning();
     });
 
-    // Restart hook: after ReconnectManager refreshes credentials, also restart the
-    // MQTT transport. Without this, auth refreshes silently but the bot stays offline.
     reconnect.setRestartHook(async (accountId: string) => {
       const t = transportMap.get(accountId);
       if (t) {
@@ -404,20 +396,13 @@ async function bootstrap(): Promise<void> {
       }
     });
 
-    // Permanent failure hook: when MiraiTransport gives up (AppState expired or
-    // max retries exceeded), it signals here so ReconnectManager can decide whether
-    // to attempt a full credential refresh or log a critical alert.
-    // This prevents the silent zombie state where transport stops retrying but
-    // nothing in the outer system knows about it.
     for (const { label, transport: t } of transports) {
       t.setOnPermanentFailure((reason: string) => {
         log.error(
-          `Transport [${label}]: permanent failure signalled — reason: ${reason}. ` +
+          `Transport [${label}]: permanent failure — reason: ${reason}. ` +
           `Triggering ReconnectManager forced reconnect. [permanent-failure]`,
           { label, reason, stats: t.getStats() },
         );
-        // Force an immediate reconnect attempt (bypasses the health-check interval delay).
-        // ReconnectManager.reconnect() respects guard limits so it won't spam Facebook.
         reconnect.reconnect(label).catch((err: unknown) => {
           log.error(`Forced reconnect after permanent failure threw for [${label}].`, {
             error: err instanceof Error ? err.message : String(err),
@@ -427,26 +412,7 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  if (!primaryCreds && !secondaryCreds) {
-    if (config.facebook.pageAccessToken) {
-      const connection = new FacebookConnection();
-      const client     = new FacebookClient(connection);
-      const sender: ISender = new FacebookSender(client);
-      setGroupSender(sender);
-      connection.connect();
-      log.info("Sender: FacebookSender (Graph API).");
-    } else {
-      log.warn("No sender — health-only mode. Set FB_APPSTATE.");
-      const noOp: ISender = {
-        sendText:     async () => { log.warn("NoOpSender: no FB_APPSTATE."); },
-        sendTyping:   async () => {},
-        sendReaction: async () => {},
-      };
-      setGroupSender(new HumanBehaviorSender(noOp));
-    }
-  }
-
-  // 7. Plugin system
+  // 8. Plugin system
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
@@ -474,19 +440,16 @@ async function bootstrap(): Promise<void> {
     svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
   }
 
-  // Pre-start MongoDB repos — provided BEFORE bot.register so plugins can consume them
-  // during onLoad. DatabaseManager initializes before PluginManager inside bot.start(),
-  // so DB is connected by the time any plugin's onLoad runs.
-  let botAdminRepo_:       BotAdminRepository     | null = null;
-  let groupSettingsRepo_:  GroupSettingsRepository | null = null;
-  let banRepo_:            BanRepository           | null = null;
-  let botConfigRepo_:      BotConfigRepository     | null = null;
+  let botAdminRepo_:      BotAdminRepository     | null = null;
+  let groupSettingsRepo_: GroupSettingsRepository | null = null;
+  let banRepo_:           BanRepository           | null = null;
+  let botConfigRepo_:     BotConfigRepository     | null = null;
 
   if (mongoEnabled) {
     botAdminRepo_      = new BotAdminRepository();
     groupSettingsRepo_ = new GroupSettingsRepository();
     banRepo_           = new BanRepository();
-    const blackConfigRepo = new BlackConfigRepository();
+    const blackConfigRepo  = new BlackConfigRepository();
     botConfigRepo_     = new BotConfigRepository();
     const commandStatsRepo = new CommandStatsRepository();
 
@@ -501,22 +464,22 @@ async function bootstrap(): Promise<void> {
     svcReg.provide("bot-config-repo",     botConfigRepo_,      "core");
     svcReg.provide("command-stats-repo",  commandStatsRepo,    "core");
 
-    log.info("Database: MongoDB repos wired to stores and service registry (pre-start).");
+    log.info("Database: MongoDB repos wired (pre-start).");
   }
 
   bot.register(pluginManager);
 
-  // 8. Webhook routes (primary account handles webhook verification)
+  // 9. Webhook routes (primary account handles verification + incoming webhooks)
   if (transports[0]) {
     const conn    = new FacebookConnection();
     const gateway = new FacebookGateway(
       conn,
       new HumanBehaviorSender(new MiraiSender(transports[0].transport)),
-      new FacebookEventNormalizer()
+      new FacebookEventNormalizer(),
+      config.bot.ownerIds,
+      adminStore,
+      userSvc,
     );
-    gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
-    gateway.getContextBuilder().setUserService(userSvc);
-    gateway.getContextBuilder().setAdminStore(adminStore);
     conn.connect();
 
     app.use("/webhook", createWebhookRouter(gateway, {
@@ -528,11 +491,10 @@ async function bootstrap(): Promise<void> {
   app.use(notFoundHandler);
   app.use(httpErrorHandler);
 
-  // 9. Start bot (initializes all registered systems, including DatabaseManager)
+  // 10. Start bot (initializes all registered systems in registration order)
   await bot.start();
 
-  // 10. Post-start: load persisted data from MongoDB into in-memory stores
-  // (DB is now connected; repos were wired pre-start so plugins already loaded their data)
+  // 11. Post-start: load persisted data from MongoDB into in-memory stores
   if (mongoEnabled && botAdminRepo_ && groupSettingsRepo_ && banRepo_) {
     try {
       await Promise.all([
@@ -545,7 +507,6 @@ async function bootstrap(): Promise<void> {
         await prefixStore.loadFromDatabase(botConfigRepo_);
       }
 
-      // One-time migration: imports any existing data/*.json files into MongoDB
       await runMigrationIfNeeded();
 
       log.info("Post-start: all stores loaded from MongoDB.", {
@@ -560,15 +521,15 @@ async function bootstrap(): Promise<void> {
   }
 
   log.info("── BOT READY ────────────────────────────────────────────────", {
-    accounts:    transports.map(({ label, transport: t }) => ({
+    accounts:   transports.map(({ label, transport: t }) => ({
       label,
       userId:    t.getCurrentUserId(),
       connected: t.isConnected(),
     })),
-    prefix:      prefixStore.get(),
-    nodeEnv:     config.nodeEnv,
-    mongoDb:     mongoEnabled ? "connected" : "disabled — set MONGODB_URI for persistence",
-    adminCount:  adminStore.size(),
+    prefix:     prefixStore.get(),
+    nodeEnv:    config.nodeEnv,
+    mongoDb:    mongoEnabled ? "connected" : "disabled — set MONGODB_URI for persistence",
+    adminCount: adminStore.size(),
   });
 
   if (process.send) process.send("ready");
