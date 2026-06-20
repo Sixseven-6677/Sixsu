@@ -9,98 +9,111 @@ import { LoggerManager }    from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("MessageHandler");
 
-// ── Singleton references (wired by bootstrap) ─────────────────────────────
+// ─── MessageHandler class ─────────────────────────────────────────────────────
 
-let pipeline:         CommandPipeline  | undefined;
-let registry:         CommandRegistry  | undefined;
-let scheduler:        TaskScheduler    | undefined;
-let reconnectManager: ReconnectManager | undefined;
-let banStore:         BanStore         | undefined;
-let userService:      IUserService     | undefined;
+export class MessageHandler {
+  constructor(
+    private readonly pipeline:         CommandPipeline,
+    private readonly registry:         CommandRegistry,
+    private readonly scheduler:        TaskScheduler,
+    private readonly reconnectManager: ReconnectManager,
+    private readonly banStore:         BanStore,
+    private readonly userService:      IUserService | undefined,
+  ) {}
 
-export function setCommandPipeline(p: CommandPipeline):   void { pipeline         = p; }
-export function setCommandRegistry(r: CommandRegistry):   void { registry         = r; }
-export function setTaskScheduler(s: TaskScheduler):       void { scheduler        = s; }
-export function setReconnectManager(r: ReconnectManager): void { reconnectManager = r; }
-export function setBanStore(b: BanStore):                 void { banStore         = b; }
-export function setUserService(s: IUserService):          void { userService      = s; }
+  get commandPipeline():  CommandPipeline  { return this.pipeline; }
+  get commandRegistry():  CommandRegistry  { return this.registry; }
+  get taskScheduler():    TaskScheduler    { return this.scheduler; }
+  get reconnect():        ReconnectManager { return this.reconnectManager; }
+  get bans():             BanStore         { return this.banStore; }
+  get users():            IUserService | undefined { return this.userService; }
 
-export function getCommandPipeline():  CommandPipeline  | undefined { return pipeline;         }
-export function getCommandRegistry():  CommandRegistry  | undefined { return registry;         }
-export function getTaskScheduler():    TaskScheduler    | undefined { return scheduler;        }
-export function getReconnectManager(): ReconnectManager | undefined { return reconnectManager; }
-export function getBanStore():         BanStore         | undefined { return banStore;         }
-export function getUserService():      IUserService     | undefined { return userService;      }
+  handle = async (ctx: Context): Promise<void> => {
+    const msgType = ctx.message.isPostback
+      ? "postback"
+      : ctx.message.attachments.length > 0
+        ? "attachment"
+        : ctx.message.text
+          ? "text"
+          : "empty";
 
-// ── Entry point ───────────────────────────────────────────────────────────
+    log.info("MessageHandler: routing message.", {
+      userId:          ctx.user.id,
+      role:            ctx.user.role,
+      msgType,
+      text:            (ctx.message.text ?? "").slice(0, 80),
+      attachmentCount: ctx.message.attachments.length,
+      postbackPayload: ctx.message.postbackPayload?.slice(0, 80),
+    });
 
+    if (ctx.message.isPostback) {
+      await this.handlePostback(ctx);
+      return;
+    }
+
+    if (ctx.message.attachments.length > 0) {
+      log.debug("MessageHandler: attachment received — ignoring.", {
+        userId: ctx.user.id,
+        types:  ctx.message.attachments.map((a) => a.type),
+      });
+      return;
+    }
+
+    if (ctx.message.text) {
+      await this.handleText(ctx);
+      return;
+    }
+
+    log.debug("MessageHandler: message has no actionable content — skipping.", {
+      userId: ctx.user.id,
+    });
+  };
+
+  private async handleText(ctx: Context): Promise<void> {
+    log.info("MessageHandler: entering command pipeline.", {
+      userId:      ctx.user.id,
+      commandName: ctx.commandName ?? "(none)",
+      text:        (ctx.message.text ?? "").slice(0, 80),
+    });
+    await this.pipeline.run(ctx);
+  }
+
+  private async handlePostback(ctx: Context): Promise<void> {
+    log.info("MessageHandler: postback received.", {
+      userId:  ctx.user.id,
+      payload: ctx.message.postbackPayload,
+    });
+    await ctx.reply(`Postback: ${ctx.message.postbackPayload}`);
+  }
+}
+
+// ─── Backward-compat singleton wiring (used by index.ts during transition) ───
+// These will be removed once index.ts is decomposed into bootstrap/ modules.
+
+let _handler: MessageHandler | undefined;
+
+export function createMessageHandler(
+  pipeline:         CommandPipeline,
+  registry:         CommandRegistry,
+  scheduler:        TaskScheduler,
+  reconnectManager: ReconnectManager,
+  banStore:         BanStore,
+  userService:      IUserService | undefined,
+): MessageHandler {
+  _handler = new MessageHandler(pipeline, registry, scheduler, reconnectManager, banStore, userService);
+  return _handler;
+}
+
+export function getMessageHandler(): MessageHandler {
+  if (!_handler) throw new Error("MessageHandler not initialised — call createMessageHandler() first.");
+  return _handler;
+}
+
+/** Entry point for FCA event adapter (bound to handler.handle) */
 export async function handleMessage(ctx: Context): Promise<void> {
-  const msgType = ctx.message.isPostback
-    ? "postback"
-    : ctx.message.attachments.length > 0
-      ? "attachment"
-      : ctx.message.text
-        ? "text"
-        : "empty";
-
-  log.info("MessageHandler: routing message.", {
-    userId:          ctx.user.id,
-    role:            ctx.user.role,
-    msgType,
-    text:            (ctx.message.text ?? "").slice(0, 80),
-    attachmentCount: ctx.message.attachments.length,
-    postbackPayload: ctx.message.postbackPayload?.slice(0, 80),
-  });
-
-  if (ctx.message.isPostback) {
-    await handlePostback(ctx);
+  if (!_handler) {
+    log.warn("MessageHandler: not initialised — dropping message.", { userId: ctx.user.id });
     return;
   }
-
-  if (ctx.message.attachments.length > 0) {
-    // Silently ignore attachments — no reply sent
-    log.debug("MessageHandler: attachment received — ignoring.", {
-      userId: ctx.user.id,
-      types:  ctx.message.attachments.map((a) => a.type),
-    });
-    return;
-  }
-
-  if (ctx.message.text) {
-    await handleText(ctx);
-    return;
-  }
-
-  log.debug("MessageHandler: message has no actionable content — skipping.", {
-    userId: ctx.user.id,
-  });
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────
-
-async function handleText(ctx: Context): Promise<void> {
-  if (!pipeline) {
-    log.warn("CommandPipeline not wired — echoing raw text.", {
-      userId: ctx.user.id,
-      text:   ctx.message.text,
-    });
-    await ctx.reply(`استقبلت: ${ctx.message.text}`);
-    return;
-  }
-
-  log.info("MessageHandler: entering command pipeline.", {
-    userId:      ctx.user.id,
-    commandName: ctx.commandName ?? "(none)",
-    text:        (ctx.message.text ?? "").slice(0, 80),
-  });
-
-  await pipeline.run(ctx);
-}
-
-async function handlePostback(ctx: Context): Promise<void> {
-  log.info("MessageHandler: postback received.", {
-    userId:  ctx.user.id,
-    payload: ctx.message.postbackPayload,
-  });
-  await ctx.reply(`Postback: ${ctx.message.postbackPayload}`);
+  return _handler.handle(ctx);
 }
