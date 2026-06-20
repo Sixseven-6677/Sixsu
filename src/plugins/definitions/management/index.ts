@@ -149,6 +149,29 @@ function getThreadState(data: ProtectionStore, threadID: string): ThreadState {
   return data.threads[threadID]!;
 }
 
+function saveThreadState(
+  store:    ProtectionStore,
+  threadId: string,
+  repo:     IGroupSettingsRepository | null,
+  logger:   IPluginContext['logger'],
+): void {
+  if (!repo) return;
+  const state = store.threads[threadId];
+  if (!state) return;
+  repo.upsert(threadId, {
+    protectName:      state.protectName,
+    lockedName:       state.lockedName,
+    protectNicknames: state.protectNicknames,
+    nicknames:        state.nicknames,
+    botNickname:      store.botNicknames[threadId] ?? '',
+  }).catch((err: unknown) => {
+    logger.warn('saveThreadState: failed to persist to MongoDB.', {
+      threadId, error: String(err),
+    });
+  });
+}
+
+
 // ─── FCA promise wrappers ─────────────────────────────────────────────────────
 
 function fcaGetThreadInfo(api: IFcaManagement, threadID: string): Promise<ThreadInfo> {
