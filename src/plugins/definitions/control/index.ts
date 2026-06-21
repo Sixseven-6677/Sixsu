@@ -382,7 +382,7 @@ class ControlPlugin implements IPlugin {
 
     pCtx.scheduleRecurring({
       name:           "control-group-cache-refresh",
-      intervalMs:     60_000,
+      intervalMs:     600_000, // 10 min - heavy API call was every 60s
       runImmediately: true,
       fn: async () => {
         const api = getApi(pCtx);
