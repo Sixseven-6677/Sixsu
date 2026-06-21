@@ -5,10 +5,15 @@ const log = LoggerManager.getLogger('HumanBehaviorSender');
 
 /**
  * Adds human-like typing delay before every text message.
- * Delay bands (scales with message length):
- *   Short  (<100 chars)  -> 800-1500 ms
- *   Medium (<300 chars)  -> 1500-2500 ms
- *   Long   (>=300 chars) -> 2000-3500 ms
+ *
+ * Delay model (bell-curve via two uniform random samples):
+ *   Short  (<80 chars)   -> 600-1600 ms  (avg ~1100 ms)
+ *   Medium (<250 chars)  -> 1200-2600 ms (avg ~1900 ms)
+ *   Long   (>=250 chars) -> 1800-4000 ms (avg ~2900 ms)
+ *
+ * Using r1+r2 produces a triangle/bell distribution — real typists
+ * cluster near the midpoint, rarely at extremes. Harder to fingerprint
+ * than a single Math.random() uniform distribution.
  */
 export class HumanBehaviorSender implements ISender {
   private readonly inner: ISender;
@@ -42,11 +47,16 @@ export class HumanBehaviorSender implements ISender {
     return this.inner.sendReaction(messageId, recipientId, emoji);
   }
 
+  /**
+   * Bell-curve delay: sum of two uniform samples gives triangle distribution.
+   * More values near midpoint, fewer at extremes — closer to real typing rhythm.
+   */
   private static calculateDelay(text: string): number {
-    const len = text.length;
-    if (len < 100) return 800  + Math.random() * 700;   // 0.8-1.5 s
-    if (len < 300) return 1500 + Math.random() * 1000;  // 1.5-2.5 s
-    return               2000 + Math.random() * 1500;   // 2.0-3.5 s
+    const bell = Math.random() + Math.random(); // [0,2], peak at 1
+    const len  = text.length;
+    if (len < 80)  return 600  + bell * 500;   // 600-1600 ms
+    if (len < 250) return 1200 + bell * 700;   // 1200-2600 ms
+    return               1800 + bell * 1100;   // 1800-4000 ms
   }
 
   private static sleep(ms: number): Promise<void> {
