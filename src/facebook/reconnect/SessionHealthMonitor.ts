@@ -4,7 +4,7 @@ import { HealthCheckFn, OnDisconnectedFn }  from "./types/IReconnect";
 const log = LoggerManager.getLogger("SessionHealthMonitor");
 
 export interface SessionHealthMonitorOptions {
-  /** How often to poll for health (ms). Default: 30 000 */
+  /** Base interval between health checks (ms). Actual interval varies +/-20% to avoid robotic timing. */
   intervalMs:      number;
   /** Async function returning true if account is healthy. */
   healthCheck:     HealthCheckFn;
@@ -14,8 +14,14 @@ export interface SessionHealthMonitorOptions {
   getAccounts:     () => string[];
 }
 
+/** Returns a delay with +/-20% jitter so health checks do not fire on a perfect clock. */
+function withJitter(baseMs: number): number {
+  const jitter = (Math.random() - 0.5) * 0.4 * baseMs;
+  return Math.max(baseMs + jitter, 10_000);
+}
+
 export class SessionHealthMonitor {
-  private timer:   ReturnType<typeof setInterval> | null = null;
+  private timer:   ReturnType<typeof setTimeout> | null = null;
   private running  = false;
   private readonly opts: SessionHealthMonitorOptions;
 
@@ -25,19 +31,15 @@ export class SessionHealthMonitor {
 
   start(): void {
     if (this.timer !== null) return;
-
     log.info(
-      `SessionHealthMonitor started. Interval: ${this.opts.intervalMs}ms`
+      `SessionHealthMonitor started. Base interval: ${this.opts.intervalMs}ms (+/-20% jitter)`
     );
-
-    this.timer = setInterval(() => {
-      if (!this.running) void this.tick();
-    }, this.opts.intervalMs);
+    this.scheduleNext();
   }
 
   stop(): void {
     if (this.timer !== null) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
     log.info("SessionHealthMonitor stopped.");
@@ -46,6 +48,16 @@ export class SessionHealthMonitor {
   /** Force an immediate health check outside the normal interval. */
   async checkNow(): Promise<void> {
     await this.tick();
+  }
+
+  private scheduleNext(): void {
+    const delay = withJitter(this.opts.intervalMs);
+    log.debug(`SessionHealthMonitor: next check in ${Math.round(delay / 1000)}s.`);
+    this.timer = setTimeout(async () => {
+      this.timer = null;
+      if (!this.running) await this.tick();
+      this.scheduleNext();
+    }, delay);
   }
 
   private async tick(): Promise<void> {
