@@ -84,6 +84,8 @@ export class MiraiTransport implements ISystem {
   private eventHandler:         FcaEventHandler | null = null;
   private rawListeners:         FcaEventHandler[]     = [];
   private running               = false;
+  /** Fresh AppState saved after every successful login — used on reconnect to avoid stale cookies. */
+  private currentAppState:      FcaCookie[]              = [];
   private reconnectTimer:       ReturnType<typeof setTimeout> | null = null;
   private loginAttempts         = 0;
   private listenerStartMs       = 0;
@@ -114,7 +116,7 @@ export class MiraiTransport implements ISystem {
     listenEvents:      true,
     updatePresence:    false,
     forceLogin:        false,
-    autoMarkDelivered: true,
+    autoMarkDelivered: false,
     autoMarkRead:      false,
     autoReconnect:     false,
   };
@@ -244,7 +246,7 @@ export class MiraiTransport implements ISystem {
       let resolved = false;
 
       const loginOptions: { appState: FcaCookie[]; pageID?: string } = {
-        appState: this.appState,
+        appState: this.currentAppState.length > 0 ? this.currentAppState : this.appState,
         ...(earlyPageId ? { pageID: earlyPageId } : {}),
       };
 
@@ -303,6 +305,11 @@ export class MiraiTransport implements ISystem {
           attempt:     this.loginAttempts + 1,
         });
         diagnosticMonitor.recordAppStateCheck(this.name, this.appState.length, freshCookies.length);
+        // Save fresh cookies for next reconnect — avoids stale-AppState loops
+        if (freshCookies.length > 0) {
+          this.currentAppState = freshCookies;
+          log.info(`MiraiTransport [${this.name}]: AppState refreshed (${freshCookies.length} cookies saved).`);
+        }
         // ──────────────────────────────────────────────────────────────────
 
         log.info(`MiraiTransport [${this.name}]: logged in. [listener-start]`, {
@@ -398,7 +405,7 @@ export class MiraiTransport implements ISystem {
 
       // ── DIAG: Count incoming messages (= autoMarkDelivered API calls) ───
       if ((event as Record<string, unknown>).type === "message") {
-        diagnosticMonitor.recordApiCall("autoMarkDelivered", this.name);
+        diagnosticMonitor.recordApiCall("incomingMessage", this.name); // autoMarkDelivered is OFF — no API call made
       }
       // ─────────────────────────────────────────────────────────────────────
 
