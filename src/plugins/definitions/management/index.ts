@@ -412,7 +412,7 @@ async function handleSetNickname(
       threadState.nicknames[uid] = nick;
       ok++;
     } catch { failed++; }
-    await sleep(1_000);
+    await sleep(800 + Math.random() * 1_200); // jittered 800-2000ms
   }
 
   let nickBotRestoreOk = true;
@@ -651,7 +651,7 @@ async function handleClearNicknames(
       await fcaChangeNickname(api, "", ctx.thread.id, uid);
       ok++;
     } catch { failed++; }
-    await sleep(1_000);
+    await sleep(800 + Math.random() * 1_200); // jittered 800-2000ms
   }
 
   let clearBotRestoreOk = true;
