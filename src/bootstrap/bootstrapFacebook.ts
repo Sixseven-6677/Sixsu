@@ -137,7 +137,7 @@ function wireReconnectHooks(
     const t = map.get(id);
     // Healthy = transport is running (self-recovery counts as healthy).
     // Unhealthy = transport permanently stopped (needs credential refresh).
-    return t ? t.isRunning() : false;
+    return t ? t.isConnected() : false;
   });
 
   reconnect.setRestartHook(async (id) => {
