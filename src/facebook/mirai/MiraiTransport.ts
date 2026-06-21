@@ -116,7 +116,7 @@ export class MiraiTransport implements ISystem {
     listenEvents:      true,
     updatePresence:    false,
     forceLogin:        false,
-    autoMarkDelivered: false,
+    autoMarkDelivered: true,
     autoMarkRead:      false,
     autoReconnect:     false,
   };
@@ -221,9 +221,10 @@ export class MiraiTransport implements ISystem {
     );
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
-    this.api           = null;
-    this.loginAttempts = 0;
-    this.running       = true;
+    this.api             = null;
+    this.currentAppState = [];   // reset: prevents poisoned cookies persisting through restart
+    this.loginAttempts   = 0;
+    this.running         = true;
     await this.doLogin();
   }
 
