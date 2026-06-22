@@ -1,6 +1,7 @@
 export { FacebookTransport }    from "./FacebookTransport.js";
 export { SessionManager }       from "./SessionManager.js";
 export { ConnectionController } from "./ConnectionController.js";
+export { ReconnectManager }     from "./ReconnectManager.js";
 
 export type {
   AppState,
@@ -13,3 +14,4 @@ export type {
 
 export type { LoadSource, SaveTarget, SaveBase64Result } from "./SessionManager.js";
 export type { ConnectionStatus, EventRecord }            from "./ConnectionController.js";
+export type { ReconnectConfig, ReconnectState, ReconnectSnapshot } from "./ReconnectManager.js";
