@@ -20,6 +20,8 @@ import { ISender }                  from "../facebook/types/ISender";
 import { AdminStore }               from "../middleware/built-in/admin-store";
 import { UserService }              from "../users/UserService";
 import { ReconnectManager }         from "../facebook/reconnect/ReconnectManager";
+import { SessionManager }           from "../facebook/session/SessionManager";
+import { FcaCookie }                from "../facebook/mirai/FcaTypes";
 import { handleMessage }            from "../handlers/message.handler";
 import {
   setGroupSender, setGroupBotUserId, setGroupApiGetter,
@@ -39,12 +41,12 @@ export interface ActiveTransport {
 
 /**
  * Extracts the Facebook user ID from an FCA app-state cookie array.
- * The `c_user` cookie holds the numeric Facebook user ID.
+ * Supports both `key` (fca-unofficial standard) and `name` (legacy) formats.
  */
 function getUserIdFromAppState(appState: unknown): string {
   try {
-    const cookies = appState as Array<{ name: string; value: string }>;
-    return cookies.find((c) => c.name === "c_user")?.value ?? "";
+    const cookies = appState as Array<{ key?: string; name?: string; value: string }>;
+    return cookies.find((c) => (c.key ?? c.name) === "c_user")?.value ?? "";
   } catch {
     return "";
   }
@@ -60,10 +62,15 @@ interface AccountOpts {
   bot:            Bot;
   isPrimary:      boolean;
   startupDelayMs: number;
+  auth:           AuthManager;
+  sessionManager: SessionManager;
 }
 
 function bootFcaAccount(opts: AccountOpts): MiraiTransport {
-  const { label, credentials, userSvc, adminStore, bot, isPrimary, startupDelayMs } = opts;
+  const {
+    label, credentials, userSvc, adminStore, bot,
+    isPrimary, startupDelayMs, auth, sessionManager,
+  } = opts;
 
   const botUserId  = getUserIdFromAppState(credentials.appState);
   const systemName = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
@@ -88,9 +95,6 @@ function bootFcaAccount(opts: AccountOpts): MiraiTransport {
     adminStore,
     userSvc,
   );
-  // Note: FacebookConnection.connect() is intentionally NOT called for FCA-based
-  // transports. MiraiTransport manages its own MQTT lifecycle. The connection
-  // object is only needed by FacebookGateway for webhook verification logic.
 
   const adapter          = new FcaEventAdapter(botUserId);
   const accountSender    = sender;
@@ -120,6 +124,19 @@ function bootFcaAccount(opts: AccountOpts): MiraiTransport {
     }
   });
 
+  // ── Fresh AppState persistence ─────────────────────────────────────────────
+  // After each successful MQTT login, fca-unofficial returns refreshed cookies.
+  // We update AuthManager in-memory and persist to the session store so the
+  // next restart uses the newest cookies, extending session lifetime.
+  transport.setOnAppStateRefresh((freshCookies: FcaCookie[]) => {
+    auth.updateAppState(label, freshCookies);
+    sessionManager.saveSession(label).catch((err: unknown) => {
+      log.warn(`[${label}] Failed to persist refreshed AppState to session store.`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  });
+
   bot.register(transport);
   log.info(`Account [${label}]: registered.`, { botUserId });
   return transport;
@@ -135,8 +152,6 @@ function wireReconnectHooks(
 
   reconnect.setHealthCheck(async (id) => {
     const t = map.get(id);
-    // Healthy = transport is running (self-recovery counts as healthy).
-    // Unhealthy = transport permanently stopped (needs credential refresh).
     return t ? t.isConnected() : false;
   });
 
@@ -167,11 +182,12 @@ function wireReconnectHooks(
 // ── Main entry ────────────────────────────────────────────────────────────────
 
 export function bootstrapFacebook(
-  auth:       AuthManager,
-  userSvc:    UserService,
-  adminStore: AdminStore,
-  bot:        Bot,
-  reconnect:  ReconnectManager,
+  auth:           AuthManager,
+  userSvc:        UserService,
+  adminStore:     AdminStore,
+  bot:            Bot,
+  reconnect:      ReconnectManager,
+  sessionManager: SessionManager,
 ): ActiveTransport[] {
   const transports: ActiveTransport[] = [];
 
@@ -182,6 +198,7 @@ export function bootstrapFacebook(
     const t = bootFcaAccount({
       label: "primary", credentials: primaryCreds,
       userSvc, adminStore, bot, isPrimary: true, startupDelayMs: 0,
+      auth, sessionManager,
     });
     transports.push({ label: "primary", transport: t });
   }
@@ -193,9 +210,10 @@ export function bootstrapFacebook(
       // 5-second stagger: prevents FB rate-limits when two accounts log in
       // from the same IP in quick succession.
       startupDelayMs: 5_000,
+      auth, sessionManager,
     });
     transports.push({ label: "secondary", transport: t });
-    log.info("✅ Two accounts active — running on primary + secondary.");
+    log.info("Two accounts active — running on primary + secondary.");
   }
 
   if (transports.length === 0) {

@@ -95,6 +95,8 @@ export class MiraiTransport implements ISystem {
 
   /** Callback invoked when the transport permanently gives up (AppState expired or max retries). */
   private onPermanentFailure:   ((reason: string) => void) | null = null;
+  /** Callback invoked with fresh cookies after every successful MQTT login. */
+  private onAppStateRefresh:    ((cookies: FcaCookie[]) => void) | null = null;
 
   private static readonly MAX_LOGIN_ATTEMPTS  = 5;
   /**
@@ -150,6 +152,11 @@ export class MiraiTransport implements ISystem {
   /** Called when transport gives up permanently — lets outer code trigger a hard restart. */
   setOnPermanentFailure(fn: (reason: string) => void): void {
     this.onPermanentFailure = fn;
+  }
+
+  /** Register a callback that fires with refreshed cookies after every successful MQTT login. */
+  setOnAppStateRefresh(fn: (cookies: FcaCookie[]) => void): void {
+    this.onAppStateRefresh = fn;
   }
 
   getApi():          FcaApi | null { return this.api; }
@@ -309,6 +316,7 @@ export class MiraiTransport implements ISystem {
         // Save fresh cookies for next reconnect — avoids stale-AppState loops
         if (freshCookies.length > 0) {
           this.currentAppState = freshCookies;
+          this.onAppStateRefresh?.(freshCookies);
           log.info(`MiraiTransport [${this.name}]: AppState refreshed (${freshCookies.length} cookies saved).`);
         }
         // ──────────────────────────────────────────────────────────────────

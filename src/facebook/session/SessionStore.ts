@@ -1,8 +1,8 @@
 import fs   from "fs";
 import path from "path";
-import { CryptoHelper }                from "../auth/CryptoHelper";
-import { SessionFile, SessionEntry }   from "./types/ISession";
-import { LoggerManager }               from "../../logger/LoggerManager";
+import { CryptoHelper }              from "../auth/CryptoHelper";
+import { SessionFile, SessionEntry } from "./types/ISession";
+import { LoggerManager }             from "../../logger/LoggerManager";
 
 const log           = LoggerManager.getLogger("SessionStore");
 const STORE_VERSION = 1;
@@ -12,9 +12,8 @@ export class SessionStore {
   private readonly encryptionKey: string;
 
   /**
-   * Write operations are serialised through this promise chain so that
-   * concurrent save() calls never interleave their read-modify-write cycle
-   * and overwrite each other's data.
+   * Serialises all writes through a promise chain so concurrent save() / delete()
+   * calls never interleave their read-modify-write cycles.
    */
   private writeQueue: Promise<void> = Promise.resolve();
 
@@ -25,7 +24,6 @@ export class SessionStore {
   }
 
   async save(entry: SessionEntry): Promise<void> {
-    // Chain behind any in-flight write so operations are serialised.
     this.writeQueue = this.writeQueue.then(() => this.doSave(entry));
     return this.writeQueue;
   }
@@ -37,23 +35,18 @@ export class SessionStore {
 
     let decrypted: string;
     try {
-      decrypted = await CryptoHelper.decrypt(entry.encryptedAppState, this.encryptionKey);
+      decrypted = await CryptoHelper.decrypt(entry.appStateData, this.encryptionKey);
     } catch (err) {
       log.error(`Failed to decrypt session for "${accountId}".`, err);
       return null;
     }
 
-    return { ...entry, encryptedAppState: decrypted };
+    return { ...entry, appStateData: decrypted };
   }
 
-  delete(accountId: string): boolean {
-    // Serialise deletes through the write queue as well.
-    let resolved = false;
-    this.writeQueue = this.writeQueue.then(() => {
-      resolved = this.doDelete(accountId);
-    });
-    // Synchronous return value is a best-effort signal; callers should await save().
-    return this.doDelete_sync(accountId, resolved);
+  /** Queues a delete; fully serialised through the write queue. */
+  delete(accountId: string): void {
+    this.writeQueue = this.writeQueue.then(() => this.doDelete(accountId));
   }
 
   listAccounts(): string[] {
@@ -65,32 +58,26 @@ export class SessionStore {
   private async doSave(entry: SessionEntry): Promise<void> {
     const file           = this.readRaw();
     const encryptedState = await CryptoHelper.encrypt(
-      entry.encryptedAppState,
+      entry.appStateData,
       this.encryptionKey
     );
 
-    file.sessions[entry.accountId] = { ...entry, encryptedAppState: encryptedState };
+    file.sessions[entry.accountId] = { ...entry, appStateData: encryptedState };
     file.updatedAt = new Date().toISOString();
 
     this.writeRaw(file);
     log.info(`Session saved for account: ${entry.accountId}`);
   }
 
-  private doDelete(accountId: string): boolean {
+  private doDelete(accountId: string): void {
     const file = this.readRaw();
-    if (!file.sessions[accountId]) return false;
+    if (!file.sessions[accountId]) return;
 
     delete file.sessions[accountId];
     file.updatedAt = new Date().toISOString();
     this.writeRaw(file);
 
     log.info(`Session deleted for account: ${accountId}`);
-    return true;
-  }
-
-  /** Synchronous variant used for the immediate return value only. */
-  private doDelete_sync(accountId: string, _queued: boolean): boolean {
-    return this.readRaw().sessions[accountId] !== undefined ? true : false;
   }
 
   private ensureDir(): void {
@@ -105,7 +92,7 @@ export class SessionStore {
     try {
       return JSON.parse(fs.readFileSync(this.filePath, "utf8")) as SessionFile;
     } catch (err) {
-      log.error("Session store corrupted. Starting fresh.", err);
+      log.error("Session store file corrupted — starting fresh.", err);
       return { version: STORE_VERSION, updatedAt: new Date().toISOString(), sessions: {} };
     }
   }

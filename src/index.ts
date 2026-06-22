@@ -72,7 +72,7 @@ async function bootstrap(): Promise<void> {
   const { bot, cache, scheduler, mongoEnabled } = await bootstrapCore(config.database.mongoUri);
 
   // 3. Auth: AuthManager + SessionManager + ReconnectManager
-  const { auth, reconnect } = await bootstrapAuth(bot);
+  const { auth, sessionManager, reconnect } = await bootstrapAuth(bot);
 
   // 4. In-memory stores + UserService
   const { banStore, lockdownStore, adminStore, userSvc } = bootstrapStores(
@@ -85,8 +85,8 @@ async function bootstrap(): Promise<void> {
     banStore, lockdownStore, adminStore, scheduler, reconnect, userSvc,
   );
 
-  // 6. FCA accounts: transports + reconnect hooks
-  const booted = bootstrapFacebook(auth, userSvc, adminStore, bot, reconnect);
+  // 6. FCA accounts: transports + reconnect hooks + session refresh wiring
+  const booted = bootstrapFacebook(auth, userSvc, adminStore, bot, reconnect, sessionManager);
   transports.push(...booted);
 
   // 7. Plugin system + optional MongoDB repos (pre-wired before bot.start())

@@ -8,7 +8,8 @@ export enum SessionStatus {
 
 export interface SessionEntry {
   accountId: string;
-  encryptedAppState: string;
+  /** Plaintext AppState JSON in memory; encrypted on disk by SessionStore. */
+  appStateData: string;
   createdAt: string;
   expiresAt: string | null;
   lastValidatedAt: string | null;

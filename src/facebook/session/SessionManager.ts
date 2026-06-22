@@ -42,6 +42,8 @@ export class SessionManager implements ISystem {
     log.info("SessionManager destroyed.");
   }
 
+  // ── Session persistence ───────────────────────────────────────────────────
+
   async saveSession(accountId: string): Promise<void> {
     const credentials = this.auth.getCredentials(accountId);
     if (!credentials) {
@@ -52,17 +54,37 @@ export class SessionManager implements ISystem {
 
     const entry: SessionEntry = {
       accountId,
-      encryptedAppState: JSON.stringify(credentials.appState),
-      createdAt:         credentials.loadedAt.toISOString(),
-      expiresAt:         new Date(Date.now() + this.ttlMs).toISOString(),
-      lastValidatedAt:   new Date().toISOString(),
-      status:            SessionStatus.ACTIVE,
-      failCount:         0,
+      appStateData:    JSON.stringify(credentials.appState),
+      createdAt:       credentials.loadedAt.toISOString(),
+      expiresAt:       new Date(Date.now() + this.ttlMs).toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      status:          SessionStatus.ACTIVE,
+      failCount:       0,
     };
 
     await this.store.save(entry);
-    log.info(`Session saved for account: ${accountId}`);
+    log.info(`Session saved for account: ${accountId} cookies=${credentials.appState.length}`);
   }
+
+  /**
+   * Persist sessions for all currently authenticated accounts.
+   * Safe to call concurrently — SessionStore serialises writes internally.
+   */
+  async saveAll(): Promise<void> {
+    const accounts = this.auth.getAuthenticatedAccounts();
+    let saved = 0;
+    for (const id of accounts) {
+      try {
+        await this.saveSession(id);
+        saved++;
+      } catch (err) {
+        log.warn(`saveAll: failed to save session for "${id}".`, err);
+      }
+    }
+    log.info(`saveAll: ${saved}/${accounts.length} sessions saved.`);
+  }
+
+  // ── Session restore ───────────────────────────────────────────────────────
 
   async restoreSession(accountId: string): Promise<boolean> {
     log.info(`Restoring session for account: ${accountId}`);
@@ -84,9 +106,9 @@ export class SessionManager implements ISystem {
 
     let appState: AppState;
     try {
-      appState = JSON.parse(entry.encryptedAppState) as AppState;
+      appState = JSON.parse(entry.appStateData) as AppState;
     } catch {
-      log.error(`Session data for "${accountId}" is corrupted.`);
+      log.error(`Session data for "${accountId}" is corrupted (invalid JSON).`);
       await this.markCorrupted(accountId, entry);
       return false;
     }
@@ -103,32 +125,44 @@ export class SessionManager implements ISystem {
       status:          SessionStatus.ACTIVE,
     });
 
-    log.info(`Session restored for account: ${accountId}`);
+    log.info(`Session restored for account: ${accountId} cookies=${appState.length}`);
     return true;
   }
 
+  /**
+   * Restore sessions only for accounts NOT already authenticated via env/file.
+   * Env/file credentials are always fresher and take priority over persisted sessions.
+   */
   async restoreAll(): Promise<void> {
-    const accounts = this.store.listAccounts();
-    if (accounts.length === 0) {
+    const allStored = this.store.listAccounts();
+    if (allStored.length === 0) {
       log.info("No saved sessions found.");
       return;
     }
 
+    const toRestore = allStored.filter((id) => !this.auth.isAuthenticated(id));
+    if (toRestore.length === 0) {
+      log.info(
+        `restoreAll: all ${allStored.length} stored account(s) already authenticated ` +
+        `via env/file — session restore skipped.`
+      );
+      return;
+    }
+
     let restored = 0;
-    for (const id of accounts) {
+    for (const id of toRestore) {
       if (await this.restoreSession(id)) restored++;
     }
 
-    log.info(`Sessions restored: ${restored}/${accounts.length}`);
+    log.info(`Sessions restored: ${restored}/${toRestore.length}`);
   }
 
+  // ── Reconnect ─────────────────────────────────────────────────────────────
+
   /**
-   * Attempt a re-login for a specific account via the registered AuthManager
-   * provider, then persist the refreshed session.
-   *
-   * This method is intentionally kept internal to SessionManager.
-   * For production reconnect flows with retry/backoff, callers should use
-   * ReconnectManager.reconnect() instead of calling this directly.
+   * Attempt a re-login via the registered AuthManager provider, then persist the
+   * refreshed session. For production reconnect flows with retry/backoff, prefer
+   * ReconnectManager.reconnect() which calls this internally.
    */
   async reconnect(accountId: string): Promise<boolean> {
     log.info(`Reconnecting account: ${accountId}`);
@@ -137,7 +171,7 @@ export class SessionManager implements ISystem {
     if (entry && entry.failCount >= MAX_FAIL_COUNT) {
       log.error(
         `Account "${accountId}" exceeded max reconnect attempts (${MAX_FAIL_COUNT}). ` +
-        `Manual intervention required.`
+        `Manual credential rotation required.`
       );
       return false;
     }
@@ -153,6 +187,8 @@ export class SessionManager implements ISystem {
     log.info(`Reconnect successful for account: ${accountId}`);
     return true;
   }
+
+  // ── Validation ────────────────────────────────────────────────────────────
 
   validate(accountId: string): SessionValidationResult {
     if (!this.auth.isAuthenticated(accountId)) {
@@ -177,6 +213,8 @@ export class SessionManager implements ISystem {
       : SessionStatus.DISCONNECTED;
   }
 
+  // ── Private helpers ───────────────────────────────────────────────────────
+
   private validateEntry(entry: SessionEntry): SessionValidationResult {
     if (entry.status === SessionStatus.CORRUPTED) {
       return {
@@ -189,7 +227,7 @@ export class SessionManager implements ISystem {
     if (entry.failCount >= MAX_FAIL_COUNT) {
       return {
         valid:  false,
-        reason: `Too many failures (${entry.failCount}).`,
+        reason: `Too many failures (${entry.failCount}/${MAX_FAIL_COUNT}).`,
         status: SessionStatus.DISCONNECTED,
       };
     }
@@ -197,7 +235,7 @@ export class SessionManager implements ISystem {
     if (entry.expiresAt && Date.now() > new Date(entry.expiresAt).getTime()) {
       return {
         valid:  false,
-        reason: "Session has expired.",
+        reason: `Session expired at ${entry.expiresAt}.`,
         status: SessionStatus.EXPIRED,
       };
     }
@@ -211,12 +249,6 @@ export class SessionManager implements ISystem {
     status:    SessionStatus
   ): Promise<void> {
     if (status === SessionStatus.EXPIRED) {
-      /**
-       * Do NOT attempt reconnect directly here. An expired session at startup
-       * will be detected by ReconnectManager's health monitor and retried with
-       * proper backoff + guard logic. Auto-reconnecting here would bypass those
-       * safeguards and create a duplicate parallel reconnect flow.
-       */
       log.warn(
         `Session for "${accountId}" expired. ` +
         `ReconnectManager will handle re-authentication with retry/backoff.`

@@ -18,7 +18,7 @@ export class AuthManager implements ISystem {
   private readonly providers = new Map<string, IAuthProvider>();
 
   async initialize(): Promise<void> {
-    log.info(`AuthManager initialized. Registered providers: ${this.providers.size}`);
+    log.info(`AuthManager initialized. providers=${this.providers.size}`);
   }
 
   async destroy(): Promise<void> {
@@ -58,7 +58,7 @@ export class AuthManager implements ISystem {
     }
 
     this.accounts.set(accountId, { accountId, appState, loadedAt: new Date() });
-    log.info(`Account "${accountId}" authenticated.`);
+    log.info(`Account "${accountId}" authenticated. cookies=${appState.length}`);
 
     return { success: true, accountId, status: AuthStatus.AUTHENTICATED };
   }
@@ -76,6 +76,22 @@ export class AuthManager implements ISystem {
     log.info(`Credentials injected for account: ${credentials.accountId}`);
   }
 
+  /**
+   * Update the stored AppState for an account in-memory.
+   * Used by the transport layer to persist fresh cookies obtained from
+   * fca-unofficial after a successful MQTT connection so that the next
+   * session save writes the latest cookies, not the original ones.
+   */
+  updateAppState(accountId: string, appState: AppState): void {
+    const existing = this.accounts.get(accountId);
+    if (!existing) {
+      log.warn(`updateAppState: account "${accountId}" not found.`);
+      return;
+    }
+    this.accounts.set(accountId, { ...existing, appState, loadedAt: new Date() });
+    log.info(`AppState updated for account: ${accountId} cookies=${appState.length}`);
+  }
+
   logout(accountId: string): void {
     this.accounts.delete(accountId);
     log.info(`Account "${accountId}" logged out.`);
@@ -89,8 +105,16 @@ export class AuthManager implements ISystem {
     return this.accounts.has(accountId);
   }
 
+  hasProvider(accountId: string): boolean {
+    return this.providers.has(accountId);
+  }
+
   getAuthenticatedAccounts(): string[] {
     return Array.from(this.accounts.keys());
+  }
+
+  getRegisteredAccounts(): string[] {
+    return Array.from(this.providers.keys());
   }
 
   static fromEnv(accountId: string, envKey: string): { accountId: string; provider: IAuthProvider } {
