@@ -41,12 +41,9 @@ function isSessionExpiredError(msg: string): boolean {
  * Zero behaviour change — purely additive instrumentation.
  */
 function wrapApiForDiagnostics(api: FcaApi, accountId: string): FcaApi {
-  // All methods we want to count. String array to avoid TS constraint on keyof FcaApi
-  // since fca-unofficial exposes more methods at runtime than our stub interface.
   const TRACKED: string[] = [
     "sendMessage", "sendTypingIndicator", "setMessageReaction", "getAppState",
     "listen", "logout",
-    // Runtime methods not in the stub interface but called by plugins:
     "getThreadList", "getThreadInfo", "setTitle",
     "removeUserFromGroup", "changeAdminStatus", "handleMessageRequest",
     "markAsRead", "markAsDelivered",
@@ -217,21 +214,43 @@ export class MiraiTransport implements ISystem {
    * Called by ReconnectManager after it successfully refreshes credentials, bridging
    * the gap between "credentials valid" and "MQTT actually reconnected".
    *
-   * Also used by the self-healing watchdog to recover from zombie state
-   * (loginAttempts exceeded MAX without setting running=false).
+   * @param freshAppState  Fresh cookies from the latest credential refresh (session store
+   *                       or env provider). When provided, the transport uses these instead
+   *                       of the stale original env cookies — this is the key fix for the
+   *                       "9.5 hour disconnect" pattern where stale cookies caused the
+   *                       reconnect to fail silently. When absent, falls back to original
+   *                       env cookies (last resort only).
    */
-  async restart(): Promise<void> {
+  async restart(freshAppState?: FcaCookie[]): Promise<void> {
     log.info(
-      `MiraiTransport [${this.name}]: external restart requested — ` +
-      `resetting retry counters. [self-healing]`,
-      { prevAttempts: this.loginAttempts, totalReconnects: this.totalReconnects },
+      `MiraiTransport [${this.name}]: external restart requested. [self-healing]`,
+      {
+        prevAttempts:    this.loginAttempts,
+        totalReconnects: this.totalReconnects,
+        hasFreshCookies: (freshAppState?.length ?? 0) > 0,
+        freshCookieCount: freshAppState?.length ?? 0,
+      },
     );
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
-    this.api             = null;
-    this.currentAppState = [];   // reset: prevents poisoned cookies persisting through restart
-    this.loginAttempts   = 0;
-    this.running         = true;
+    this.api = null;
+
+    // Use provided fresh cookies if available — avoids stale-cookie reconnect failures.
+    // This is the PRIMARY FIX for the "9.5 hour disconnect": previously we always
+    // cleared currentAppState here, forcing the next doLogin() to use the original
+    // env cookies (which could be hours old). Now we use the latest cookies from the
+    // credential refresh (session store → env fallback).
+    if (freshAppState && freshAppState.length > 0) {
+      this.currentAppState = freshAppState;
+      log.info(`MiraiTransport [${this.name}]: using ${freshAppState.length} fresh cookies for restart.`);
+    } else {
+      // No fresh cookies provided — reset to original env cookies (last resort).
+      this.currentAppState = [];
+      log.warn(`MiraiTransport [${this.name}]: no fresh cookies provided — falling back to original env cookies.`);
+    }
+
+    this.loginAttempts = 0;
+    this.running       = true;
     await this.doLogin();
   }
 
@@ -249,6 +268,7 @@ export class MiraiTransport implements ISystem {
       log.info(`MiraiTransport [${this.name}]: logging in…`, {
         attempt:     this.loginAttempts + 1,
         earlyPageId: earlyPageId || "(not found)",
+        usingFreshCookies: this.currentAppState.length > 0,
       });
 
       let resolved = false;
@@ -271,9 +291,7 @@ export class MiraiTransport implements ISystem {
               `MiraiTransport [${this.name}]: AppState expired — stopping retries. [permanent-failure]`,
               { error: errMsg },
             );
-            // ── DIAG ─────────────────────────────────────────────────────
             diagnosticMonitor.recordAppStateInvalid(this.name, errMsg);
-            // ─────────────────────────────────────────────────────────────
             this.running = false;
             this.lastDisconnectedAt = Date.now();
             resolved = true;
@@ -282,12 +300,10 @@ export class MiraiTransport implements ISystem {
             return;
           }
 
-          // ── DIAG ─────────────────────────────────────────────────────
           diagnosticMonitor.recordLogin(this.name, false, {
             error:   errMsg,
             attempt: this.loginAttempts + 1,
           });
-          // ─────────────────────────────────────────────────────────────
           log.warn(`MiraiTransport [${this.name}]: login failed.`, { error: errMsg });
           resolved = true;
           resolve();
@@ -295,17 +311,16 @@ export class MiraiTransport implements ISystem {
           return;
         }
 
-        // ── DIAG: Wrap API for call counting (zero behaviour change) ──────
+        // ── Wrap API for diagnostics (zero behaviour change) ──────────────
         const wrappedApi = wrapApiForDiagnostics(api, this.name);
         this.api = wrappedApi;
-        // ──────────────────────────────────────────────────────────────────
 
         wrappedApi.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
         this.lastConnectedAt = Date.now();
         this.totalReconnects++;
 
-        // ── DIAG: Login success + AppState drift check ────────────────────
+        // ── AppState refresh + drift check ────────────────────────────────
         const freshCookies  = api.getAppState();
         diagnosticMonitor.recordLogin(this.name, true, {
           userId:      api.getCurrentUserID(),
@@ -319,7 +334,6 @@ export class MiraiTransport implements ISystem {
           this.onAppStateRefresh?.(freshCookies);
           log.info(`MiraiTransport [${this.name}]: AppState refreshed (${freshCookies.length} cookies saved).`);
         }
-        // ──────────────────────────────────────────────────────────────────
 
         log.info(`MiraiTransport [${this.name}]: logged in. [listener-start]`, {
           userId:          api.getCurrentUserID(),
@@ -340,9 +354,7 @@ export class MiraiTransport implements ISystem {
     log.info(`MiraiTransport [${this.name}]: starting MQTT listener…`);
     this.listenerStartMs = Date.now();
 
-    // ── DIAG: MQTT connect ────────────────────────────────────────────────
     diagnosticMonitor.recordMqttConnect(this.name);
-    // ─────────────────────────────────────────────────────────────────────
 
     this.stopListenFn = this.api.listen((err, event) => {
       if (err) {
@@ -362,9 +374,7 @@ export class MiraiTransport implements ISystem {
 
         this.lastDisconnectedAt = Date.now();
 
-        // ── DIAG: MQTT disconnect ─────────────────────────────────────────
         diagnosticMonitor.recordMqttDisconnect(this.name, { errorCode: errCode, errorMsg: errMsg, stableMs });
-        // ─────────────────────────────────────────────────────────────────
 
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
           // FATAL Facebook error on the MQTT stream (e.g. 1357031 = session interrupted).
@@ -412,11 +422,9 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
-      // ── DIAG: Count incoming messages (= autoMarkDelivered API calls) ───
       if ((event as Record<string, unknown>).type === "message") {
-        diagnosticMonitor.recordApiCall("incomingMessage", this.name); // autoMarkDelivered is OFF — no API call made
+        diagnosticMonitor.recordApiCall("incomingMessage", this.name);
       }
-      // ─────────────────────────────────────────────────────────────────────
 
       log.debug(`MiraiTransport [${this.name}]: raw event received.`, { type: event.type });
 
@@ -454,16 +462,9 @@ export class MiraiTransport implements ISystem {
 
     this.loginAttempts++;
 
-    // ── DIAG: Reconnect attempt ───────────────────────────────────────────
     diagnosticMonitor.recordReconnect(this.name, reason, this.loginAttempts);
-    // ─────────────────────────────────────────────────────────────────────
 
     if (this.loginAttempts > MiraiTransport.MAX_LOGIN_ATTEMPTS) {
-      // ── Self-healing: signal permanent failure instead of silently zombifying ──
-      // Previously we just returned here, leaving the transport in a zombie state:
-      // running=true but api=null and no reconnect scheduled.
-      // Now we set running=false and invoke the permanent failure callback so
-      // ReconnectManager can trigger a clean restart via restartHook.
       log.warn(
         `MiraiTransport [${this.name}]: max login attempts ` +
         `(${MiraiTransport.MAX_LOGIN_ATTEMPTS}) reached — signalling failure. [permanent-failure]`,

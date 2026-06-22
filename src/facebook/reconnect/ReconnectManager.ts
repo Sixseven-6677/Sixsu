@@ -17,6 +17,9 @@ const log = LoggerManager.getLogger("ReconnectManager");
 
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 
+/** Maximum number of retry attempts stored per account (prevents unbounded growth). */
+const MAX_STORED_ATTEMPTS = 50;
+
 export class ReconnectManager implements ISystem {
   readonly name = "reconnect";
 
@@ -159,6 +162,10 @@ export class ReconnectManager implements ISystem {
       };
 
       record.attempts.push(entry);
+      // Keep only the last MAX_STORED_ATTEMPTS entries to prevent unbounded memory growth
+      if (record.attempts.length > MAX_STORED_ATTEMPTS) {
+        record.attempts.splice(0, record.attempts.length - MAX_STORED_ATTEMPTS);
+      }
       record.totalRuns += 1;
 
       if (success) {
@@ -197,16 +204,38 @@ export class ReconnectManager implements ISystem {
   private async attemptLogin(
     accountId: string
   ): Promise<{ success: boolean; error?: string }> {
-    log.info(`[${accountId}] Attempting login via AuthManager...`);
+    log.info(`[${accountId}] Attempting credential refresh…`);
 
-    const result = await this.auth.login(accountId);
-
-    if (!result.success) {
-      return { success: false, error: result.error ?? "AuthManager returned failure" };
+    // ── Try session store first (has freshest cookies from last MQTT login) ────────
+    // The session store is updated every time fca-unofficial returns fresh cookies
+    // (via setOnAppStateRefresh → auth.updateAppState + sessionManager.saveSession).
+    // Using these cookies on reconnect avoids the "stale env cookies" failure where
+    // the original FB_APPSTATE (hours or days old) no longer works after a session
+    // rotation. Falls back to env/file provider only if the session store has nothing.
+    let sessionRestored = false;
+    try {
+      sessionRestored = await this.session.restoreSession(accountId);
+      if (sessionRestored) {
+        log.info(`[${accountId}] Auth: fresh cookies loaded from session store. [session-restore]`);
+      }
+    } catch (restoreErr) {
+      log.warn(`[${accountId}] Session restore failed — falling back to env credentials.`, {
+        error: restoreErr instanceof Error ? restoreErr.message : String(restoreErr),
+      });
     }
 
-    log.info(`[${accountId}] Auth login succeeded. Saving session...`);
+    if (!sessionRestored) {
+      // Fall back: read original AppState from env/file provider
+      log.info(`[${accountId}] Auth: no session store data — loading from env/file provider.`);
+      const result = await this.auth.login(accountId);
+      if (!result.success) {
+        return { success: false, error: result.error ?? "AuthManager returned failure" };
+      }
+      log.info(`[${accountId}] Auth login succeeded (env/file).`);
+    }
 
+    // Persist the credentials we just loaded (session store → env) so the
+    // next reconnect always has fresh data available.
     try {
       await this.session.saveSession(accountId);
     } catch (err) {

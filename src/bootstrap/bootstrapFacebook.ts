@@ -147,6 +147,7 @@ function bootFcaAccount(opts: AccountOpts): MiraiTransport {
 function wireReconnectHooks(
   transports: ActiveTransport[],
   reconnect:  ReconnectManager,
+  auth:       AuthManager,
 ): void {
   const map = new Map(transports.map(({ label, transport }) => [label, transport]));
 
@@ -158,8 +159,15 @@ function wireReconnectHooks(
   reconnect.setRestartHook(async (id) => {
     const t = map.get(id);
     if (t) {
-      log.info(`ReconnectManager → restarting transport [${id}].`);
-      await t.restart();
+      // Pass the latest credentials (freshly loaded by ReconnectManager.attemptLogin:
+      // session store → env fallback) so the transport uses current cookies, not the
+      // stale original env cookies stored in the constructor.
+      // This is the PRIMARY FIX for the 9.5-hour disconnect pattern.
+      const creds = auth.getCredentials(id);
+      log.info(`ReconnectManager → restarting transport [${id}].`, {
+        hasFreshCreds: (creds?.appState?.length ?? 0) > 0,
+      });
+      await t.restart(creds?.appState);
     }
   });
 
@@ -227,7 +235,7 @@ export function bootstrapFacebook(
   }
 
   if (transports.length > 0) {
-    wireReconnectHooks(transports, reconnect);
+    wireReconnectHooks(transports, reconnect, auth);
   }
 
   return transports;
