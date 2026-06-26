@@ -1,7 +1,7 @@
-import { FcaApi, FcaCookie }    from "../../mirai/FcaTypes";
+import { FcaApi, FcaCookie }    from "../mirai/FcaTypes";
 import { AppState, IAuthProvider } from "./types/IAuth";
 import { AuthFailureReason }       from "./types/IAuthPipeline";
-import { LoggerManager }           from "../../../logger/LoggerManager";
+import { LoggerManager }           from "../../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("EmailPasswordProvider");
 
