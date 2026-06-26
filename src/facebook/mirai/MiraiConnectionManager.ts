@@ -115,10 +115,11 @@ export class MiraiConnectionManager implements ISystem {
     });
 
     this.transport.setOnAppStateRefresh((cookies) => {
-      const filtered = MiraiConnectionManager.filterAppState(cookies);
-      const toSave   = filtered.length >= 2 ? filtered : cookies;
-      log.info(`[${this.name}]: AppState refreshed — ${cookies.length} → ${toSave.length} cookies.`);
-      this.onAppStateRefresh?.(toSave);
+      // Save ALL cookies — do NOT filter before session storage.
+      // Filtering strips cookies fca-unofficial needs to re-authenticate on reconnect,
+      // which causes USER_ID=0 login failures and reconnect loops.
+      log.info(`[${this.name}]: AppState refreshed — ${cookies.length} cookies. Saving full set.`);
+      this.onAppStateRefresh?.(cookies);
     });
   }
 
@@ -162,13 +163,9 @@ export class MiraiConnectionManager implements ISystem {
     // إعادة تسجيل handler بـ generation ملتقط جديد قبل الاتصال
     this.rewireEventHandler();
 
-    const filtered = freshAppState
-      ? MiraiConnectionManager.filterAppState(freshAppState)
-      : undefined;
-
-    await this.transport.restart(
-      filtered && filtered.length >= 2 ? filtered : freshAppState,
-    );
+    // Pass ALL cookies to transport — do NOT filter before fca-unofficial login.
+    // filterAppState was stripping cookies needed for re-authentication (USER_ID=0 bug).
+    await this.transport.restart(freshAppState);
   }
 
   // ── Static helpers ───────────────────────────────────────────────────────────
