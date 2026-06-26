@@ -15,8 +15,7 @@ import { UserService }                     from "../users/UserService";
 import { BanStore }                        from "../middleware/built-in/banned.middleware";
 import { LockdownStore }                   from "../middleware/built-in/lockdown.middleware";
 import { AdminStore }                      from "../middleware/built-in/admin-store";
-import { MiraiTransport }                  from "../facebook/mirai/MiraiTransport";
-import { MiraiSender }                     from "../facebook/mirai/MiraiSender";
+import { ApiProvider, MiraiSender }        from "../facebook/mirai/MiraiSender";
 import { HumanBehaviorSender }             from "../facebook/HumanBehaviorSender";
 import { BotAdminRepository }             from "../database/repositories/botadmin.repository";
 import { GroupSettingsRepository }        from "../database/repositories/group-settings.repository";
@@ -44,7 +43,7 @@ export function bootstrapPlugins(
   banStore:     BanStore,
   lockdownStore: LockdownStore,
   adminStore:   AdminStore,
-  transports:   Array<{ label: string; transport: MiraiTransport }>,
+  transports:   Array<{ label: string; transport: ApiProvider }>,
   mongoEnabled: boolean,
 ): PluginsBootstrap {
   const pluginManager = new PluginManager({
