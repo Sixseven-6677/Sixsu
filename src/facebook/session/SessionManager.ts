@@ -78,7 +78,7 @@ export class SessionManager implements ISystem {
         await this.saveSession(id);
         saved++;
       } catch (err) {
-        log.warn(`saveAll: failed to save session for "${id}".`, err);
+        log.warn(`saveAll: failed to save session for "${id}".`, err as Record<string, unknown>);
       }
     }
     log.info(`saveAll: ${saved}/${accounts.length} sessions saved.`);
