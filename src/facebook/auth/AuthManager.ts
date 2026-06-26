@@ -14,8 +14,14 @@ const log = LoggerManager.getLogger("AuthManager");
 export class AuthManager implements ISystem {
   readonly name = "auth";
 
-  private readonly accounts  = new Map<string, AuthCredentials>();
-  private readonly providers = new Map<string, IAuthProvider>();
+  private readonly accounts          = new Map<string, AuthCredentials>();
+  private readonly providers         = new Map<string, IAuthProvider>();
+  /**
+   * Fallback providers tried in order after the main provider fails.
+   * Designed for EmailPasswordProvider — registered via registerFallbackProvider().
+   * Transparent to ReconnectManager: auth.login() uses them automatically.
+   */
+  private readonly fallbackProviders = new Map<string, IAuthProvider[]>();
 
   async initialize(): Promise<void> {
     log.info(`AuthManager initialized. providers=${this.providers.size}`);
@@ -24,8 +30,11 @@ export class AuthManager implements ISystem {
   async destroy(): Promise<void> {
     this.accounts.clear();
     this.providers.clear();
+    this.fallbackProviders.clear();
     log.info("AuthManager destroyed. All credentials cleared.");
   }
+
+  // ── Provider registration ─────────────────────────────────────────────────
 
   registerAccount(accountId: string, provider: IAuthProvider): this {
     if (this.providers.has(accountId)) {
@@ -36,9 +45,35 @@ export class AuthManager implements ISystem {
     return this;
   }
 
+  /**
+   * Register a fallback provider that is tried (in registration order) when the
+   * main provider fails. The canonical use case is registering an
+   * EmailPasswordProvider so that auth.login() automatically falls back to a full
+   * email/password login during reconnects — without any changes to ReconnectManager.
+   */
+  registerFallbackProvider(accountId: string, provider: IAuthProvider): this {
+    const existing = this.fallbackProviders.get(accountId) ?? [];
+    existing.push(provider);
+    this.fallbackProviders.set(accountId, existing);
+    log.info(
+      `Fallback provider registered for account: ${accountId} ` +
+      `(total fallbacks: ${existing.length})`
+    );
+    return this;
+  }
+
+  // ── Authentication ────────────────────────────────────────────────────────
+
+  /**
+   * Authenticates an account using its registered provider.
+   * If the main provider fails, each fallback provider is tried in order.
+   *
+   * For the startup multi-stage pipeline with full per-stage reporting,
+   * use AuthPipeline.run() instead — it wraps this method and adds diagnostics.
+   */
   async login(accountId: string): Promise<AuthResult> {
-    const provider = this.providers.get(accountId);
-    if (!provider) {
+    const mainProvider = this.providers.get(accountId);
+    if (!mainProvider) {
       return {
         success: false,
         status:  AuthStatus.UNAUTHENTICATED,
@@ -48,18 +83,50 @@ export class AuthManager implements ISystem {
 
     log.info(`Logging in account: ${accountId}`);
 
-    let appState: AppState;
+    // ── Try main provider ─────────────────────────────────────────────────
+    let appState:  AppState | undefined;
+    let lastError: string  | undefined;
+
     try {
-      appState = await provider.load();
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      log.error(`Login failed for "${accountId}": ${error}`);
-      return { success: false, status: AuthStatus.CORRUPTED, error };
+      appState  = await mainProvider.load();
+      lastError = undefined;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
+      const hasFallbacks = (this.fallbackProviders.get(accountId)?.length ?? 0) > 0;
+      log.warn(
+        `Main provider failed for "${accountId}": ${lastError}.` +
+        (hasFallbacks ? " Trying fallback provider(s)…" : "")
+      );
+    }
+
+    // ── Try fallback providers in order ───────────────────────────────────
+    if (!appState) {
+      const fallbacks = this.fallbackProviders.get(accountId) ?? [];
+      for (let i = 0; i < fallbacks.length; i++) {
+        log.info(`Fallback provider ${i + 1}/${fallbacks.length} for "${accountId}"…`);
+        try {
+          appState  = await fallbacks[i].load();
+          lastError = undefined;
+          log.info(
+            `Fallback provider ${i + 1} succeeded for "${accountId}". ` +
+            `cookies=${appState.length}`
+          );
+          break;
+        } catch (err: unknown) {
+          lastError = err instanceof Error ? err.message : String(err);
+          log.warn(`Fallback provider ${i + 1} failed for "${accountId}": ${lastError}`);
+        }
+      }
+    }
+
+    // ── Result ────────────────────────────────────────────────────────────
+    if (!appState) {
+      log.error(`Login failed for "${accountId}": ${lastError}`);
+      return { success: false, status: AuthStatus.CORRUPTED, error: lastError };
     }
 
     this.accounts.set(accountId, { accountId, appState, loadedAt: new Date() });
     log.info(`Account "${accountId}" authenticated. cookies=${appState.length}`);
-
     return { success: true, accountId, status: AuthStatus.AUTHENTICATED };
   }
 
@@ -109,6 +176,10 @@ export class AuthManager implements ISystem {
     return this.providers.has(accountId);
   }
 
+  hasFallbacks(accountId: string): boolean {
+    return (this.fallbackProviders.get(accountId)?.length ?? 0) > 0;
+  }
+
   getAuthenticatedAccounts(): string[] {
     return Array.from(this.accounts.keys());
   }
@@ -117,7 +188,10 @@ export class AuthManager implements ISystem {
     return Array.from(this.providers.keys());
   }
 
-  static fromEnv(accountId: string, envKey: string): { accountId: string; provider: IAuthProvider } {
+  static fromEnv(
+    accountId: string,
+    envKey: string
+  ): { accountId: string; provider: IAuthProvider } {
     const value = process.env[envKey];
     if (!value) {
       throw new Error(`Environment variable "${envKey}" is not set.`);
@@ -125,7 +199,10 @@ export class AuthManager implements ISystem {
     return { accountId, provider: new AppStateProvider({ fromEnv: value }) };
   }
 
-  static fromFile(accountId: string, filePath: string): { accountId: string; provider: IAuthProvider } {
+  static fromFile(
+    accountId: string,
+    filePath: string
+  ): { accountId: string; provider: IAuthProvider } {
     return { accountId, provider: new AppStateProvider({ fromFile: filePath }) };
   }
 }
