@@ -52,12 +52,17 @@ export const config = {
   },
 
   auth: {
-    // ── Primary account ───────────────────────────────────────────────────
+    // ── AppState (Stage 1 — primary login method) ─────────────────────────
     appStateEnvKey:  optionalEnv("FB_APPSTATE_ENV_KEY",  "FB_APPSTATE"),
     appStateFile:    optionalEnv("FB_APPSTATE_FILE"),
-    // ── Secondary account (optional — set FB_APPSTATE_2 in env to activate)
+    // ── Secondary account (optional — set FB_APPSTATE_2 to activate) ─────
     appStateEnvKey2: optionalEnv("FB_APPSTATE_ENV_KEY_2", "FB_APPSTATE_2"),
     appStateFile2:   optionalEnv("FB_APPSTATE_FILE_2"),
+
+    // ── Email/Password fallback (Stage 2 — only used when AppState fails) ─
+    // The password value is NEVER read here — only presence is checked.
+    // EmailPasswordProvider.fromEnv() reads FB_EMAIL / FB_PASSWORD directly.
+    hasEmailFallback: !!(process.env["FB_EMAIL"] && process.env["FB_PASSWORD"]),
 
     sessionFile:    optionalEnv("FB_SESSION_FILE", path.resolve("data/sessions.json")),
     sessionSecret:  resolveSessionSecret(),

@@ -30,6 +30,8 @@ export interface AuthResult {
   accountId?: string;
   error?: string;
   status: AuthStatus;
+  /** Which pipeline stage supplied these credentials (set by AuthPipeline). */
+  stageUsed?: string;
 }
 
 export interface IAuthProvider {
