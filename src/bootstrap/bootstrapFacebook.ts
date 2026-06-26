@@ -18,7 +18,7 @@
 import { Bot }                         from "../core/Bot";
 import { config }                      from "../config/env";
 import { AuthManager }                 from "../facebook/auth/AuthManager";
-import { AuthCredentials }             from "../facebook/auth/types/IAuth";
+import { AuthCredentials, AppState }   from "../facebook/auth/types/IAuth";
 import { FacebookConnection }          from "../facebook/FacebookConnection";
 import { FacebookEventNormalizer }     from "../facebook/FacebookEventNormalizer";
 import { FacebookGateway }             from "../facebook/FacebookGateway";
@@ -144,7 +144,7 @@ function bootFcaAccount(opts: AccountOpts): MiraiConnectionManager {
   // MiraiConnectionManager filters cookies internally (filterKeysAppState)
   // before calling this callback, so we receive clean essential-only cookies.
   transport.setOnAppStateRefresh((freshCookies: FcaCookie[]) => {
-    auth.updateAppState(label, freshCookies);
+    auth.updateAppState(label, freshCookies as unknown as AppState);
     sessionManager.saveSession(label).catch((err: unknown) => {
       log.warn(`[${label}] Failed to persist refreshed AppState.`, {
         error: err instanceof Error ? err.message : String(err),
