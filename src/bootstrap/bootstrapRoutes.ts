@@ -10,8 +10,7 @@ import { config }                           from "../config/env";
 import { FacebookConnection }               from "../facebook/FacebookConnection";
 import { FacebookEventNormalizer }          from "../facebook/FacebookEventNormalizer";
 import { FacebookGateway }                  from "../facebook/FacebookGateway";
-import { MiraiTransport }                   from "../facebook/mirai/MiraiTransport";
-import { MiraiSender }                      from "../facebook/mirai/MiraiSender";
+import { ApiProvider, MiraiSender }         from "../facebook/mirai/MiraiSender";
 import { HumanBehaviorSender }              from "../facebook/HumanBehaviorSender";
 import { AdminStore }                       from "../middleware/built-in/admin-store";
 import { UserService }                      from "../users/UserService";
@@ -24,7 +23,7 @@ const log = LoggerManager.getLogger("Boot.Routes");
 
 export function bootstrapRoutes(
   app:        Express,
-  transports: Array<{ label: string; transport: MiraiTransport }>,
+  transports: Array<{ label: string; transport: ApiProvider }>,
   adminStore: AdminStore,
   userSvc:    UserService,
 ): void {
