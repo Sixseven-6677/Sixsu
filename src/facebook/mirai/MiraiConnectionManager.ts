@@ -224,7 +224,7 @@ export class MiraiConnectionManager implements ISystem {
 
       const data       = resp.data ?? "";
       const finalUrl   = String(
-        (resp.request as Record<string, unknown>)?.res?.responseUrl ?? "",
+        ((resp.request as Record<string, unknown>)?.res as Record<string, unknown>)?.responseUrl ?? "",
       );
 
       if (finalUrl.includes("/checkpoint/") || data.includes("/checkpoint/")) {
