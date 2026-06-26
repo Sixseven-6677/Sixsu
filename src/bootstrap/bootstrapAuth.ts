@@ -84,7 +84,7 @@ export async function bootstrapAuth(bot: Bot): Promise<AuthBootstrap> {
       try {
         await sessionManager.saveSession(id);
       } catch (err) {
-        log.warn(`Auth: failed to save session for "${id}".`, err);
+        log.warn(`Auth: failed to save session for "${id}".`, err as Record<string, unknown>);
       }
     } else {
       log.error(
