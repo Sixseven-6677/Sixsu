@@ -28,6 +28,9 @@ import { SessionStore }          from "../facebook/session/SessionStore";
 import { ReconnectManager }      from "../facebook/reconnect/ReconnectManager";
 import { config }                from "../config/env";
 import { LoggerManager }         from "../logger/LoggerManager";
+import * as fs   from "fs";
+import * as path from "path";
+
 
 const log = LoggerManager.getLogger("Boot.Auth");
 
@@ -72,6 +75,33 @@ export async function bootstrapAuth(bot: Bot): Promise<AuthBootstrap> {
       "Auth: email/password fallback DISABLED. " +
       "Set FB_EMAIL and FB_PASSWORD to enable automatic recovery when AppState expires."
     );
+  }
+
+
+  // ── Write fca-config.json for @dongdev/fca-unofficial auto-login ──────────
+  // @dongdev/fca-unofficial's tryAutoLoginIfNeeded() reads credentials from
+  // fca-config.json in the process working directory (not from fcaLogin() args).
+  // Without this file, the library logs "No credentials configured for auto-login"
+  // and all reconnect attempts fail permanently — even when FB_EMAIL and
+  // FB_PASSWORD are set in Railway env vars.
+  if (emailPasswordProvider) {
+    const fcaConfigPath = path.join(process.cwd(), "fca-config.json");
+    try {
+      // NOTE: fca-config.json will contain plaintext credentials.
+      // This is intentional — the library REQUIRES them in this format.
+      // Railway's container filesystem is ephemeral and not exposed externally.
+      fs.writeFileSync(fcaConfigPath, JSON.stringify({
+        email:    process.env["FB_EMAIL"]    ?? "",
+        password: process.env["FB_PASSWORD"] ?? "",
+        logLevel: "warn",
+        forceLogin: false,
+        autoReconnect: false,
+      }), "utf8");
+      log.info(`Auth: wrote fca-config.json → ${fcaConfigPath} (email/password configured)`);
+    } catch (writeErr: unknown) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      log.warn(`Auth: failed to write fca-config.json: ${msg}. Auto-login may not work.`);
+    }
   }
 
   // ── Register AppState providers ────────────────────────────────────────────
