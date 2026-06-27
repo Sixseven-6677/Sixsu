@@ -233,7 +233,9 @@ export class MiraiTransport implements ISystem {
     );
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
-    this.api = null;
+    // Force-close the FCA MQTT client — same reason as scheduleReLogin fix above.
+    // Each restart() without logout() leaves a ghost MQTT client retrying connections.
+    if (this.api) { try { this.api.logout(); } catch { /**/ } this.api = null; }
 
     // Use provided fresh cookies if available — avoids stale-cookie reconnect failures.
     // This is the PRIMARY FIX for the "9.5 hour disconnect": previously we always
@@ -483,7 +485,11 @@ export class MiraiTransport implements ISystem {
     log.info(`MiraiTransport [${this.name}]: re-login in ${delay}ms.`, { reason, attempt: this.loginAttempts });
 
     this.stopListening();
-    this.api = null;
+    // Force-close the FCA MQTT client before nulling the reference.
+    // Without this, each scheduleReLogin leaves an orphaned MQTT client that
+    // continues its own internal reconnect loop every ~2s, bypassing our
+    // circuit breaker entirely and causing endless "mqtt autoReconnect" spam.
+    if (this.api) { try { this.api.logout(); } catch { /**/ } this.api = null; }
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
