@@ -5,11 +5,6 @@ import { diagnosticMonitor } from "../../diagnostic/DiagnosticMonitor";
 
 const log = LoggerManager.getLogger("MiraiTransport");
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-const fcaLogin = require("@dongdev/fca-unofficial") as (
-  options:  { appState: FcaCookie[]; pageID?: string },
-  callback: (err: Error | null, api: FcaApi | null) => void,
-) => void;
 
 export type FcaEventHandler = (event: FcaEvent) => void;
 
