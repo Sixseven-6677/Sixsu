@@ -11,7 +11,8 @@ const log = LoggerManager.getLogger("EmailPasswordProvider");
  * We declare the broadest union here so TypeScript is satisfied.
  */
 const fcaLogin = require("@dongdev/fca-unofficial") as (
-  options:  { email: string; password: string } | { appState: FcaCookie[] },
+  options:  { email: string; password: string; forceLogin?: boolean } | { appState: FcaCookie[]; forceLogin?: boolean },
+  loginOpts: Record<string, unknown>,
   callback: (err: unknown, api: FcaApi | null) => void,
 ) => void;
 
@@ -111,8 +112,15 @@ export class EmailPasswordProvider implements IAuthProvider {
       }, LOGIN_TIMEOUT_MS);
 
       try {
+        // forceLogin:true — bypass @dongdev/fca-unofficial's MongoDB session cache.
+        // Without this, the library finds a stale cached AppState in MongoDB and
+        // uses it instead of performing a fresh email+password login, then fails
+        // with "Missing credentials for auto-login (email/password not configured
+        // in fca-config.json)" when the cached session is dead.
         fcaLogin(
-          { email: this.email, password: this.password },
+          { email: this.email, password: this.password, forceLogin: true },
+          { logLevel: "warn", selfListen: false, listenEvents: false,
+            updatePresence: false, forceLogin: true, autoReconnect: false },
           (err, api) => {
             clearTimeout(timeout);
 
