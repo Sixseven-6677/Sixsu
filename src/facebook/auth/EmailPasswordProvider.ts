@@ -5,16 +5,7 @@ import { LoggerManager }           from "../../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("EmailPasswordProvider");
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-/**
- * fca-unofficial accepts either { appState } or { email, password }.
- * We declare the broadest union here so TypeScript is satisfied.
- */
-const fcaLogin = require("@dongdev/fca-unofficial") as (
-  options:  { email: string; password: string; forceLogin?: boolean } | { appState: FcaCookie[]; forceLogin?: boolean },
-  loginOpts: Record<string, unknown>,
-  callback: (err: unknown, api: FcaApi | null) => void,
-) => void;
+// FCA is required lazily inside loginWithCredentials() so fca-config.json is written first.
 
 /** Timeout for a single email/password login attempt. */
 const LOGIN_TIMEOUT_MS = 60_000;
@@ -112,15 +103,19 @@ export class EmailPasswordProvider implements IAuthProvider {
       }, LOGIN_TIMEOUT_MS);
 
       try {
-        // forceLogin:true — bypass @dongdev/fca-unofficial's MongoDB session cache.
-        // Without this, the library finds a stale cached AppState in MongoDB and
-        // uses it instead of performing a fresh email+password login, then fails
-        // with "Missing credentials for auto-login (email/password not configured
-        // in fca-config.json)" when the cached session is dead.
+        /* eslint-disable @typescript-eslint/no-var-requires */
+        // Lazy-load FCA so fca-config.json (written by bootstrapAuth) is read ONCE at
+        // first login time, not at module load time. Moving the require here ensures
+        // bootstrapAuth has already written fca-config.json with credentials before
+        // FCA's loadConfig() runs.
+        const fcaLogin = require("@dongdev/fca-unofficial") as (
+          options:  { email: string; password: string; forceLogin?: boolean }
+                  | { appState: Array<{ key: string; value: string }> },
+          callback: (err: unknown, api: FcaApi | null) => void,
+        ) => void;
+        /* eslint-enable @typescript-eslint/no-var-requires */
         fcaLogin(
           { email: this.email, password: this.password, forceLogin: true },
-          { logLevel: "warn", selfListen: false, listenEvents: false,
-            updatePresence: false, forceLogin: true, autoReconnect: false },
           (err, api) => {
             clearTimeout(timeout);
 

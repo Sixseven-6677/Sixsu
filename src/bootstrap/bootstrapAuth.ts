@@ -90,11 +90,16 @@ export async function bootstrapAuth(bot: Bot): Promise<AuthBootstrap> {
       // NOTE: fca-config.json will contain plaintext credentials.
       // This is intentional — the library REQUIRES them in this format.
       // Railway's container filesystem is ephemeral and not exposed externally.
-      fs.writeFileSync(fcaConfigPath, JSON.stringify({
-        email:    process.env["FB_EMAIL"]    ?? "",
-        password: process.env["FB_PASSWORD"] ?? "",
-        logLevel: "warn",
-        forceLogin: false,
+fs.writeFileSync(fcaConfigPath, JSON.stringify({
+        // Top-level email/password (checked as config.email / config.password)
+        email:       process.env["FB_EMAIL"]    ?? "",
+        password:    process.env["FB_PASSWORD"] ?? "",
+        // credentials sub-object (checked as config.credentials?.email)
+        credentials: {
+          email:    process.env["FB_EMAIL"]    ?? "",
+          password: process.env["FB_PASSWORD"] ?? "",
+        },
+        autoLogin:     true,
         autoReconnect: false,
       }), "utf8");
       log.info(`Auth: wrote fca-config.json → ${fcaConfigPath} (email/password configured)`);

@@ -280,7 +280,15 @@ export class MiraiTransport implements ISystem {
         ...(earlyPageId ? { pageID: earlyPageId } : {}),
       };
 
-      fcaLogin(loginOptions, (err, api) => {
+      /* eslint-disable @typescript-eslint/no-var-requires */
+    // Lazy-load FCA so fca-config.json (written by bootstrapAuth) is read at login time,
+    // not at module load time. FCA calls loadConfig() once when the module first loads.
+    const fcaLogin = require("@dongdev/fca-unofficial") as (
+      options:  { appState: FcaCookie[]; pageID?: string },
+      callback: (err: Error | null, api: FcaApi | null) => void,
+    ) => void;
+    /* eslint-enable @typescript-eslint/no-var-requires */
+    fcaLogin(loginOptions, (err, api) => {
         if (resolved) return;
 
         if (err || !api) {
