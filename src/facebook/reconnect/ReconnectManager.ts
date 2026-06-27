@@ -21,9 +21,9 @@ const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const MAX_STORED_ATTEMPTS = 50;
 
 /**
- * After one complete runRetryLoop() failure cycle (all maxAttempts exhausted),
- * the circuit opens (CIRCUIT_OPEN) — blocking all reconnect attempts until
- * resetCircuit() is called (when fresh credentials arrive).
+ * After ONE complete runRetryLoop() failure cycle (all maxAttempts exhausted),
+ * the circuit opens — blocking all reconnect attempts until resetCircuit() is
+ * called (after new credentials arrive).
  *
  * Root cause this fixes: 1,304-reconnect loop where expired credentials caused
  * MiraiTransport(6) → ReconnectManager(5) → health-monitor → repeat forever.
@@ -31,18 +31,16 @@ const MAX_STORED_ATTEMPTS = 50;
 const CIRCUIT_OPEN_AFTER_FAILURES = 1;
 
 /**
- * How long to poll for actual MQTT connectivity after calling restartHook().
+ * How long to wait for MQTT connectivity after transport.restart().
  *
- * restartHook() calls transport.restart() which starts doLogin() asynchronously:
- * it resolves after the FIRST login attempt (success OR fail), then MiraiTransport
- * schedules retries internally. Without this poll, ReconnectManager would always
- * see the hook as "success" even when the login failed — making the circuit
- * breaker never fire.
+ * restart() calls doLogin() which resolves after the FIRST login attempt
+ * (success OR fail), then MiraiTransport schedules retries internally.
+ * Without this poll, attemptLogin always returned { success: true } even
+ * when the login failed — making the circuit breaker never fire.
  *
- * Poll interval = 1s, total wait = VERIFY_CONNECT_MS.
- * If transport is still not connected after this window → return { success: false }.
+ * Poll interval = 1s, total window = VERIFY_CONNECT_MS.
  */
-const VERIFY_CONNECT_MS   = 30_000;
+const VERIFY_CONNECT_MS    = 30_000;
 const VERIFY_POLL_INTERVAL = 1_000;
 
 export class ReconnectManager implements ISystem {
@@ -59,7 +57,7 @@ export class ReconnectManager implements ISystem {
 
   private monitor:      SessionHealthMonitor | null = null;
   private customCheck:  HealthCheckFn | null = null;
-  /** Called after auth credentials are refreshed so the transport can re-connect MQTT. */
+  /** Called after credentials refresh — bridges auth layer to MQTT transport. */
   private restartHook:  ((accountId: string) => Promise<void>) | null = null;
   private readonly opts: Required<ReconnectManagerOptions>;
 
@@ -122,15 +120,21 @@ export class ReconnectManager implements ISystem {
       return false;
     }
 
+    // ── Spam guard (entry-point only) ──────────────────────────────────────
+    // The guard is checked once at entry. We do NOT call guard.record() inside
+    // runRetryLoop — each attempt there takes ≥30s (MQTT poll), so 3 attempts
+    // in 60s exhausts maxAttemptsPerWindow and causes premature BLOCKED status
+    // before the circuit breaker can fire.
     if (!this.guard.isAllowed(accountId)) {
       const until = this.guard.blockedUntil(accountId);
       log.warn(
-        `Reconnect for "${accountId}" is blocked` +
+        `[${accountId}] Reconnect is spam-guarded` +
         (until ? ` until ${until.toISOString()}.` : ".")
       );
       this.setStatus(accountId, ReconnectStatus.BLOCKED);
       return false;
     }
+    this.guard.record(accountId);
 
     return this.runRetryLoop(accountId);
   }
@@ -190,7 +194,9 @@ export class ReconnectManager implements ISystem {
     const record  = this.ensureRecord(accountId);
     let   attempt = 0;
 
-    log.info(`[${accountId}] Starting reconnect. Max attempts: ${this.policy.maxAttempts}`);
+    log.info(
+      `[${accountId}] Starting reconnect cycle. Max attempts: ${this.policy.maxAttempts}`,
+    );
 
     while (this.policy.shouldRetry(attempt)) {
       const delayMs = attempt === 0 ? 0 : this.policy.computeDelay(attempt - 1);
@@ -203,13 +209,10 @@ export class ReconnectManager implements ISystem {
         await this.policy.sleep(delayMs);
       }
 
-      this.guard.record(accountId);
-
-      if (!this.guard.isAllowed(accountId)) {
-        log.warn(`[${accountId}] Guard blocked during retry loop.`);
-        this.setStatus(accountId, ReconnectStatus.BLOCKED);
-        return false;
-      }
+      // Note: guard.record() is intentionally NOT called here.
+      // Calling it once per attempt (each taking ≥30s) exhausts maxAttemptsPerWindow
+      // and causes premature BLOCKED status before the circuit can open.
+      // The entry-point guard in reconnect() is sufficient for spam protection.
 
       log.info(`[${accountId}] Attempt ${attempt + 1}/${this.policy.maxAttempts}...`);
       record.lastAttemptAt = new Date();
@@ -245,7 +248,6 @@ export class ReconnectManager implements ISystem {
       log.warn(
         `[${accountId}] ✗ Attempt ${attempt + 1} failed: ${error ?? "unknown"}`
       );
-
       attempt++;
 
       if (this.policy.shouldRetry(attempt)) {
@@ -263,12 +265,12 @@ export class ReconnectManager implements ISystem {
       this.setStatus(accountId, ReconnectStatus.CIRCUIT_OPEN);
       log.error(
         `[${accountId}] ⛔ Circuit OPEN after ${failures} full retry cycle(s). ` +
-        `All reconnect attempts are now BLOCKED. ` +
+        `ALL reconnect attempts are now BLOCKED. ` +
         `Action: provide fresh credentials (update FB_APPSTATE or set FB_EMAIL+FB_PASSWORD), ` +
-        `then the circuit resets automatically on next redeploy. ` +
+        `then redeploy — the circuit resets automatically on startup. ` +
         `[circuit-open]`,
         {
-          failureCycles:     failures,
+          failureCycles:      failures,
           totalLoginAttempts: this.policy.maxAttempts * failures,
         },
       );
@@ -291,7 +293,7 @@ export class ReconnectManager implements ISystem {
   ): Promise<{ success: boolean; error?: string }> {
     log.info(`[${accountId}] Attempting credential refresh…`);
 
-    // ── Step 1: restore session or fall back to env provider ──────────────
+    // ── Step 1: restore session or fall back to env ────────────────────────
     let sessionRestored = false;
     try {
       sessionRestored = await this.session.restoreSession(accountId);
@@ -321,12 +323,12 @@ export class ReconnectManager implements ISystem {
       return { success: false, error: `Session save failed: ${msg}` };
     }
 
-    // ── Step 3: restart transport (async — starts doLogin internally) ──────
+    // ── Step 3: invoke transport restart (starts doLogin async) ───────────
     if (this.restartHook) {
       try {
         log.info(`[${accountId}] Invoking transport restart hook…`);
         await this.restartHook(accountId);
-        log.info(`[${accountId}] Transport restart hook returned. Verifying MQTT connectivity…`);
+        log.info(`[${accountId}] Restart hook returned. Verifying MQTT connectivity…`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(`[${accountId}] Transport restart hook threw: ${msg}`);
@@ -334,17 +336,15 @@ export class ReconnectManager implements ISystem {
       }
     }
 
-    // ── Step 4: verify actual MQTT connectivity (circuit-breaker key fix) ──
+    // ── Step 4: verify actual MQTT connectivity ────────────────────────────
     //
-    // restartHook() calls transport.restart() which starts doLogin() asynchronously.
-    // doLogin() resolves its outer Promise after the FIRST login attempt (success OR
-    // fail), then schedules retries internally via setTimeout. Without this poll,
-    // attemptLogin would always return { success: true } even when the login failed,
-    // causing ReconnectManager to mark status=CONNECTED and reset the circuit failure
-    // counter — making the circuit breaker never fire (root cause of the 1,304-loop).
+    // restartHook → transport.restart() → doLogin() resolves after the FIRST
+    // attempt (success OR fail), then schedules retries internally. Without this
+    // poll, attemptLogin always returned { success: true } even on failure —
+    // making the circuit breaker never fire (root cause of the 1,304-loop).
     //
-    // We poll customCheck (= transport.isConnected()) for up to VERIFY_CONNECT_MS.
-    // If MQTT never connects within the window, return { success: false }.
+    // Poll every 1s for up to VERIFY_CONNECT_MS. If MQTT connects → success.
+    // If not → return { success: false } → runRetryLoop increments failure count.
     if (this.customCheck) {
       const deadline  = Date.now() + VERIFY_CONNECT_MS;
       let   connected = false;
@@ -393,32 +393,31 @@ export class ReconnectManager implements ISystem {
         // ── Circuit breaker: OPEN → never auto-retry ───────────────────────
         // Core fix for the 1,304-reconnect loop.
         // With expired credentials, every health-check triggered a new reconnect
-        // cycle even after all retry attempts were exhausted. The CIRCUIT_OPEN
-        // status blocks all health-monitor reconnects permanently until new
-        // credentials are provided and resetCircuit() is called.
+        // cycle even after all retry attempts were exhausted. CIRCUIT_OPEN blocks
+        // all health-monitor reconnects until new credentials and resetCircuit().
         if (record?.status === ReconnectStatus.CIRCUIT_OPEN) {
           log.warn(
-            `[${accountId}] ⛔ Health monitor: circuit OPEN — skipping. ` +
+            `[${accountId}] ⛔ Health monitor: circuit OPEN — not retrying. ` +
             `Update credentials and redeploy, or call resetCircuit(). [circuit-open]`,
           );
           return;
         }
 
-        // If already retrying — avoid parallel reconnect
+        // If already retrying — don't launch parallel reconnect
         if (record?.status === ReconnectStatus.RETRYING) {
           log.debug(`[${accountId}] Health check: already retrying — skip.`);
           return;
         }
 
-        // ── BLOCKED state recovery ─────────────────────────────────────────
+        // ── BLOCKED state recovery after guard window expires ──────────────
         if (record?.status === ReconnectStatus.BLOCKED) {
           const stillBlocked = this.guard.blockedUntil(accountId) !== null;
           if (stillBlocked) {
-            log.debug(`[${accountId}] Health check: blocked — waiting for window.`);
+            log.debug(`[${accountId}] Health check: guard-blocked — waiting.`);
             return;
           }
           log.info(
-            `[${accountId}] Health check: block expired — BLOCKED → IDLE. [self-healing]`,
+            `[${accountId}] Health check: guard window expired — BLOCKED → IDLE. [self-healing]`,
           );
           this.setStatus(accountId, ReconnectStatus.IDLE);
         }
@@ -431,7 +430,7 @@ export class ReconnectManager implements ISystem {
           this.circuitFailures.set(accountId, failures);
           this.setStatus(accountId, ReconnectStatus.CIRCUIT_OPEN);
           log.error(
-            `[${accountId}] ⛔ Health monitor: FAILED account → circuit OPEN. ` +
+            `[${accountId}] ⛔ Health monitor: FAILED → CIRCUIT_OPEN. ` +
             `Prevented retry loop. [circuit-open]`,
             { failureCycles: failures },
           );
@@ -439,7 +438,6 @@ export class ReconnectManager implements ISystem {
         }
 
         log.warn(`[${accountId}] Health monitor: disconnected — scheduling reconnect.`);
-
         this.reconnect(accountId).catch((err: unknown) => {
           log.error(
             `[${accountId}] Health-monitor reconnect threw.`,
