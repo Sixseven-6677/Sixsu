@@ -137,6 +137,57 @@ export class AuthManager implements ISystem {
     }
     return results;
   }
+  /**
+   * Authenticate using ONLY fallback providers (e.g. EmailPasswordProvider),
+   * bypassing the main provider entirely.
+   *
+   * In reconnect contexts, AppStateProvider.load() reads expired env cookies
+   * and returns them without liveness validation — never throwing. This causes
+   * auth.login() to always "succeed" with expired cookies, so EmailPasswordProvider
+   * (registered as fallback) is never reached through the normal path.
+   *
+   * Call this in ReconnectManager.attemptLogin() to force the fallback chain.
+   */
+  async loginFallbackOnly(accountId: string): Promise<AuthResult> {
+    const fallbacks = this.fallbackProviders.get(accountId) ?? [];
+    if (fallbacks.length === 0) {
+      return {
+        success: false,
+        status:  AuthStatus.UNAUTHENTICATED,
+        error:   `No fallback providers registered for account "${accountId}".`,
+      };
+    }
+
+    log.info(`loginFallbackOnly: trying ${fallbacks.length} fallback(s) for "${accountId}"…`);
+
+    let appState:  AppState | undefined;
+    let lastError: string  | undefined;
+
+    for (let i = 0; i < fallbacks.length; i++) {
+      log.info(`Fallback provider ${i + 1}/${fallbacks.length} for "${accountId}"…`);
+      try {
+        appState  = await fallbacks[i].load();
+        lastError = undefined;
+        log.info(
+          `Fallback provider ${i + 1} succeeded for "${accountId}". ` +
+          `cookies=${appState.length}`,
+        );
+        break;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+        log.warn(`Fallback provider ${i + 1} failed for "${accountId}": ${lastError}`);
+      }
+    }
+
+    if (!appState) {
+      log.error(`loginFallbackOnly: all fallbacks failed for "${accountId}": ${lastError}`);
+      return { success: false, status: AuthStatus.CORRUPTED, error: lastError };
+    }
+
+    this.accounts.set(accountId, { accountId, appState, loadedAt: new Date() });
+    log.info(`Account "${accountId}" authenticated via fallback. cookies=${appState.length}`);
+    return { success: true, accountId, status: AuthStatus.AUTHENTICATED };
+  }
 
   injectCredentials(credentials: AuthCredentials): void {
     this.accounts.set(credentials.accountId, credentials);

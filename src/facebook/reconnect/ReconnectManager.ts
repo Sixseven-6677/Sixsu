@@ -293,17 +293,51 @@ export class ReconnectManager implements ISystem {
   ): Promise<{ success: boolean; error?: string }> {
     log.info(`[${accountId}] Attempting credential refresh…`);
 
-    // ── Step 1: restore session or fall back to env ────────────────────────
+    // ── Step 0: Try fallback providers (email/password) first ─────────────
+    //
+    // ROOT CAUSE FIX: AppStateProvider.load() reads FB_APPSTATE from env and
+    // returns the cookies without any liveness validation — never throws, even
+    // when the Facebook session is expired. This means auth.login() always
+    // "succeeds" with expired cookies, so EmailPasswordProvider (registered as
+    // fallback) is never reached through the normal auth.login() path.
+    //
+    // In the reconnect context we already know the AppState is likely expired
+    // (that's why we're reconnecting). Call loginFallbackOnly() to bypass the
+    // main provider and go straight to email/password for fresh cookies.
     let sessionRestored = false;
-    try {
-      sessionRestored = await this.session.restoreSession(accountId);
-      if (sessionRestored) {
-        log.info(`[${accountId}] Auth: fresh cookies from session store. [session-restore]`);
+
+    if (this.auth.hasFallbacks(accountId)) {
+      log.info(
+        `[${accountId}] Reconnect: trying email/password fallback first — ` +
+        `AppState env cookies are likely expired. [fallback-first]`,
+      );
+      const fbResult = await this.auth.loginFallbackOnly(accountId);
+      if (fbResult.success) {
+        log.info(
+          `[${accountId}] Email/password login succeeded — fresh cookies obtained. ` +
+          `[email-password-ok]`,
+        );
+        sessionRestored = true; // credentials injected — skip restoreSession + auth.login()
+      } else {
+        log.warn(
+          `[${accountId}] Email/password fallback failed: ${fbResult.error ?? "unknown"}. ` +
+          `Falling back to session store / env cookies.`,
+        );
       }
-    } catch (restoreErr) {
-      log.warn(`[${accountId}] Session restore failed — falling back to env.`, {
-        error: restoreErr instanceof Error ? restoreErr.message : String(restoreErr),
-      });
+    }
+
+    // ── Step 1: restore session or fall back to env ────────────────────────
+    if (!sessionRestored) {
+      try {
+        sessionRestored = await this.session.restoreSession(accountId);
+        if (sessionRestored) {
+          log.info(`[${accountId}] Auth: fresh cookies from session store. [session-restore]`);
+        }
+      } catch (restoreErr) {
+        log.warn(`[${accountId}] Session restore failed — falling back to env.`, {
+          error: restoreErr instanceof Error ? restoreErr.message : String(restoreErr),
+        });
+      }
     }
 
     if (!sessionRestored) {
