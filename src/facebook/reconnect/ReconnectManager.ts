@@ -20,6 +20,18 @@ const HEALTH_CHECK_INTERVAL_MS = 30_000;
 /** Maximum number of retry attempts stored per account (prevents unbounded growth). */
 const MAX_STORED_ATTEMPTS = 50;
 
+/**
+ * Circuit Breaker threshold.
+ * After ONE complete runRetryLoop() failure (all maxAttempts exhausted),
+ * the circuit opens (CIRCUIT_OPEN) and all future reconnect attempts are
+ * blocked — both from health-monitor and from onPermanentFailure hooks —
+ * until resetCircuit() is called explicitly (e.g. when new credentials arrive).
+ *
+ * This prevents the 1,304-reconnect loop where expired credentials caused
+ * infinite cycles: MiraiTransport(5) → ReconnectManager(5) → health-monitor → repeat.
+ */
+const CIRCUIT_OPEN_AFTER_FAILURES = 1;
+
 export class ReconnectManager implements ISystem {
   readonly name = "reconnect";
 
@@ -28,6 +40,9 @@ export class ReconnectManager implements ISystem {
   private readonly policy:  RetryPolicy;
   private readonly guard:   ReconnectGuard;
   private readonly records  = new Map<string, ReconnectRecord>();
+
+  /** Tracks how many complete runRetryLoop() cycles failed per account. */
+  private readonly circuitFailures = new Map<string, number>();
 
   private monitor:      SessionHealthMonitor | null = null;
   private customCheck:  HealthCheckFn | null = null;
@@ -89,6 +104,18 @@ export class ReconnectManager implements ISystem {
   // ─── Public API ────────────────────────────────────────────────────────────
 
   async reconnect(accountId: string): Promise<boolean> {
+    // ── Circuit breaker: block if OPEN ─────────────────────────────────────
+    const record = this.records.get(accountId);
+    if (record?.status === ReconnectStatus.CIRCUIT_OPEN) {
+      log.warn(
+        `[${accountId}] 🔴 Circuit OPEN — reconnect() blocked. ` +
+        `Provide fresh credentials and call resetCircuit("${accountId}") to re-enable. ` +
+        `[circuit-open]`,
+        { circuitFailures: this.circuitFailures.get(accountId) ?? 0 },
+      );
+      return false;
+    }
+
     if (!this.guard.isAllowed(accountId)) {
       const until = this.guard.blockedUntil(accountId);
       log.warn(
@@ -102,6 +129,25 @@ export class ReconnectManager implements ISystem {
     return this.runRetryLoop(accountId);
   }
 
+  /**
+   * Manually reset the circuit breaker for an account.
+   *
+   * Call this after providing fresh credentials (e.g. email/password login
+   * succeeded, or the user updated FB_APPSTATE). This clears the CIRCUIT_OPEN
+   * status, resets the failure counter, and allows the health monitor and
+   * reconnect() to attempt a fresh cycle.
+   */
+  resetCircuit(accountId: string): void {
+    const prev = this.records.get(accountId)?.status ?? "NONE";
+    this.circuitFailures.delete(accountId);
+    this.guard.reset(accountId);
+    this.setStatus(accountId, ReconnectStatus.IDLE);
+    log.info(
+      `[${accountId}] ✅ Circuit RESET (${prev} → IDLE). ` +
+      `New reconnect cycle allowed. [circuit-reset]`,
+    );
+  }
+
   getRecord(accountId: string): ReconnectRecord | null {
     return this.records.get(accountId) ?? null;
   }
@@ -110,13 +156,14 @@ export class ReconnectManager implements ISystem {
     return Array.from(this.records.values());
   }
 
-  summary(): { total: number; connected: number; failed: number; blocked: number } {
+  summary(): { total: number; connected: number; failed: number; blocked: number; circuitOpen: number } {
     const all = this.getAllRecords();
     return {
-      total:     all.length,
-      connected: all.filter((r) => r.status === ReconnectStatus.CONNECTED).length,
-      failed:    all.filter((r) => r.status === ReconnectStatus.FAILED).length,
-      blocked:   all.filter((r) => r.status === ReconnectStatus.BLOCKED).length,
+      total:       all.length,
+      connected:   all.filter((r) => r.status === ReconnectStatus.CONNECTED).length,
+      failed:      all.filter((r) => r.status === ReconnectStatus.FAILED).length,
+      blocked:     all.filter((r) => r.status === ReconnectStatus.BLOCKED).length,
+      circuitOpen: all.filter((r) => r.status === ReconnectStatus.CIRCUIT_OPEN).length,
     };
   }
 
@@ -162,7 +209,6 @@ export class ReconnectManager implements ISystem {
       };
 
       record.attempts.push(entry);
-      // Keep only the last MAX_STORED_ATTEMPTS entries to prevent unbounded memory growth
       if (record.attempts.length > MAX_STORED_ATTEMPTS) {
         record.attempts.splice(0, record.attempts.length - MAX_STORED_ATTEMPTS);
       }
@@ -170,9 +216,10 @@ export class ReconnectManager implements ISystem {
 
       if (success) {
         this.guard.reset(accountId);
+        this.circuitFailures.delete(accountId);
         record.nextAttemptAt = null;
         this.setStatus(accountId, ReconnectStatus.CONNECTED);
-        log.info(`[${accountId}] ✓ Reconnected successfully on attempt ${attempt + 1}.`);
+        log.info(`[${accountId}] ✓ Reconnected successfully on attempt ${attempt + 1}. Circuit closed.`);
         return true;
       }
 
@@ -188,13 +235,35 @@ export class ReconnectManager implements ISystem {
       }
     }
 
-    this.setStatus(accountId, ReconnectStatus.FAILED);
+    // ── All attempts exhausted — trip the circuit breaker ──────────────────
+    const failures = (this.circuitFailures.get(accountId) ?? 0) + 1;
+    this.circuitFailures.set(accountId, failures);
     record.nextAttemptAt = null;
 
-    log.error(
-      `[${accountId}] ✗ All ${this.policy.maxAttempts} reconnect attempts failed. ` +
-      `Manual intervention required.`
-    );
+    if (failures >= CIRCUIT_OPEN_AFTER_FAILURES) {
+      // Circuit OPEN: block all future reconnect attempts.
+      // Prevents the health-monitor / onPermanentFailure loop that caused 1,304 reconnects.
+      this.setStatus(accountId, ReconnectStatus.CIRCUIT_OPEN);
+      log.error(
+        `[${accountId}] 🔴 Circuit OPEN after ${failures} full retry cycle(s). ` +
+        `All reconnect attempts are now blocked. ` +
+        `Action required: provide fresh credentials, then call resetCircuit("${accountId}"). ` +
+        `[circuit-open]`,
+        {
+          failureCycles:    failures,
+          totalLoopAttempts: this.policy.maxAttempts * failures,
+          hint: "Set FB_APPSTATE or FB_EMAIL+FB_PASSWORD and redeploy, then circuit auto-resets on next startup.",
+        },
+      );
+    } else {
+      this.setStatus(accountId, ReconnectStatus.FAILED);
+      log.error(
+        `[${accountId}] ✗ All ${this.policy.maxAttempts} reconnect attempts failed. ` +
+        `Failure cycle ${failures}/${CIRCUIT_OPEN_AFTER_FAILURES}. ` +
+        `Circuit will open after ${CIRCUIT_OPEN_AFTER_FAILURES} cycle(s). ` +
+        `Manual intervention required.`,
+      );
+    }
 
     return false;
   }
@@ -206,12 +275,6 @@ export class ReconnectManager implements ISystem {
   ): Promise<{ success: boolean; error?: string }> {
     log.info(`[${accountId}] Attempting credential refresh…`);
 
-    // ── Try session store first (has freshest cookies from last MQTT login) ────────
-    // The session store is updated every time fca-unofficial returns fresh cookies
-    // (via setOnAppStateRefresh → auth.updateAppState + sessionManager.saveSession).
-    // Using these cookies on reconnect avoids the "stale env cookies" failure where
-    // the original FB_APPSTATE (hours or days old) no longer works after a session
-    // rotation. Falls back to env/file provider only if the session store has nothing.
     let sessionRestored = false;
     try {
       sessionRestored = await this.session.restoreSession(accountId);
@@ -225,7 +288,6 @@ export class ReconnectManager implements ISystem {
     }
 
     if (!sessionRestored) {
-      // Fall back: read original AppState from env/file provider
       log.info(`[${accountId}] Auth: no session store data — loading from env/file provider.`);
       const result = await this.auth.login(accountId);
       if (!result.success) {
@@ -234,8 +296,6 @@ export class ReconnectManager implements ISystem {
       log.info(`[${accountId}] Auth login succeeded (env/file).`);
     }
 
-    // Persist the credentials we just loaded (session store → env) so the
-    // next reconnect always has fresh data available.
     try {
       await this.session.saveSession(accountId);
     } catch (err) {
@@ -244,8 +304,6 @@ export class ReconnectManager implements ISystem {
       return { success: false, error: `Session save failed: ${msg}` };
     }
 
-    // Bridge the auth layer to the MQTT transport layer.
-    // Without this, credentials are refreshed but the transport stays disconnected.
     if (this.restartHook) {
       try {
         log.info(`[${accountId}] Invoking transport restart hook to reconnect MQTT...`);
@@ -253,7 +311,6 @@ export class ReconnectManager implements ISystem {
         log.info(`[${accountId}] Transport restart hook completed.`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        // Log but don't fail — session was saved; transport will self-recover via scheduleReLogin
         log.warn(`[${accountId}] Transport restart hook threw: ${msg}`);
       }
     }
@@ -275,6 +332,20 @@ export class ReconnectManager implements ISystem {
       onDisconnected: (accountId) => {
         const record = this.records.get(accountId);
 
+        // ── Circuit breaker: OPEN state — never auto-retry ─────────────────
+        // This is the core fix for the 1,304-reconnect loop.
+        // When credentials are expired, every health check was triggering a
+        // new reconnect cycle even after ReconnectManager had already exhausted
+        // all retry attempts. The CIRCUIT_OPEN status blocks all health-monitor
+        // reconnects until new credentials are explicitly provided.
+        if (record?.status === ReconnectStatus.CIRCUIT_OPEN) {
+          log.warn(
+            `[${accountId}] 🔴 Health monitor: circuit OPEN — skipping auto-reconnect. ` +
+            `Provide fresh credentials and call resetCircuit(). [circuit-open]`,
+          );
+          return;
+        }
+
         // If already retrying — skip, don't launch parallel reconnects
         if (record?.status === ReconnectStatus.RETRYING) {
           log.debug(`[${accountId}] Health check: already retrying — skip.`);
@@ -282,21 +353,30 @@ export class ReconnectManager implements ISystem {
         }
 
         // ── Self-healing: BLOCKED state recovery ──────────────────────────────
-        // If BLOCKED, check whether the guard's block window has expired.
-        // If it has, reset the status to IDLE so we retry.
-        // Without this, a BLOCKED account is NEVER retried by the health monitor.
         if (record?.status === ReconnectStatus.BLOCKED) {
           const stillBlocked = this.guard.blockedUntil(accountId) !== null;
           if (stillBlocked) {
             log.debug(`[${accountId}] Health check: blocked — waiting for window to expire.`);
             return;
           }
-          // Block window expired — reset and allow retry
           log.info(
             `[${accountId}] Health check: block window expired — resetting BLOCKED → IDLE ` +
             `and scheduling reconnect. [self-healing]`
           );
           this.setStatus(accountId, ReconnectStatus.IDLE);
+        }
+
+        // ── FAILED state: trip the circuit immediately ─────────────────────
+        // Prevents a FAILED account from being retried by health monitor.
+        // The circuit will be properly managed on the next reconnect() call.
+        if (record?.status === ReconnectStatus.FAILED) {
+          log.warn(
+            `[${accountId}] Health monitor: previous cycle FAILED — opening circuit to prevent loop. [circuit-open]`,
+          );
+          const failures = (this.circuitFailures.get(accountId) ?? 0) + 1;
+          this.circuitFailures.set(accountId, failures);
+          this.setStatus(accountId, ReconnectStatus.CIRCUIT_OPEN);
+          return;
         }
 
         log.warn(`[${accountId}] Health monitor detected disconnection. Scheduling reconnect.`);
@@ -322,11 +402,12 @@ export class ReconnectManager implements ISystem {
     record.status = status;
 
     const emoji: Record<ReconnectStatus, string> = {
-      [ReconnectStatus.IDLE]:      "⚪",
-      [ReconnectStatus.RETRYING]:  "🔄",
-      [ReconnectStatus.CONNECTED]: "🟢",
-      [ReconnectStatus.FAILED]:    "🔴",
-      [ReconnectStatus.BLOCKED]:   "🚫",
+      [ReconnectStatus.IDLE]:         "⚪",
+      [ReconnectStatus.RETRYING]:     "🔄",
+      [ReconnectStatus.CONNECTED]:    "🟢",
+      [ReconnectStatus.FAILED]:       "🔴",
+      [ReconnectStatus.BLOCKED]:      "🚫",
+      [ReconnectStatus.CIRCUIT_OPEN]: "⛔",
     };
 
     log.info(`[${accountId}] Status → ${emoji[status]} ${status}`);

@@ -1,9 +1,12 @@
 export enum ReconnectStatus {
-  IDLE      = "IDLE",
-  RETRYING  = "RETRYING",
-  CONNECTED = "CONNECTED",
-  FAILED    = "FAILED",
-  BLOCKED   = "BLOCKED",
+  IDLE         = "IDLE",
+  RETRYING     = "RETRYING",
+  CONNECTED    = "CONNECTED",
+  FAILED       = "FAILED",
+  BLOCKED      = "BLOCKED",
+  /** Circuit breaker OPEN — all reconnect attempts blocked until
+   *  resetCircuit() is called (after new credentials are provided). */
+  CIRCUIT_OPEN = "CIRCUIT_OPEN",
 }
 
 export interface RetryAttempt {
