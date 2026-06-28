@@ -11,6 +11,10 @@ interface ISenderService {
   sendText(recipientId: string, text: string): Promise<void>;
 }
 
+interface ITransportStatus {
+  isConnected(): boolean;
+}
+
 // ─── Repository interface (loose coupling) ───────────────────────────────────
 
 interface IBlackConfigRepository {
@@ -91,20 +95,12 @@ function getThread(store: StoreData, threadId: string): ThreadConfig {
  *
  * @param rawText   The full raw message text (ctx.message.text).
  * @param n         Number of leading tokens to strip (commandName + subcommand = 2).
- *
- * Examples with n=2:
- *   "بلاك رسالة كلمة1   كلمة2"   => "كلمة1   كلمة2"
- *   "black msg line1\nline2"       => "line1\nline2"
- *   "blk message a  b\n  c"        => "a  b\n  c"
  */
 function rawBodyAfterArgs(rawText: string, n: number): string {
   let s = rawText;
   for (let i = 0; i < n; i++) {
-    // strip leading whitespace + next non-whitespace token
     s = s.replace(/^\s*\S+/, "");
   }
-  // trim ONLY the immediate space/tab separator (NOT newlines, which the user
-  // may have intentionally placed at the start of their message body)
   return s.replace(/^[ \t]+/, "");
 }
 
@@ -112,12 +108,28 @@ function rawBodyAfterArgs(rawText: string, n: number): string {
 
 const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
 
+/**
+ * Minimum allowed interval in seconds.
+ *
+ * WHY 60s: Facebook's anti-bot systems detect rapid automated messaging
+ * (< 60s intervals) and flag the session, leading to checkpoints and
+ * AppState expiry. Enforcing this floor prevents the most common cause
+ * of session death on hosted bots.
+ */
+const MIN_INTERVAL_SEC = 60;
+
+/**
+ * Below this threshold (5 min) the send rate is high enough to attract
+ * Facebook attention. We allow it but show a risk warning.
+ */
+const WARN_INTERVAL_SEC = 300;
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 class BlackPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "black",
-    version:     "2.1.0",
+    version:     "2.2.0",
     description: "إرسال رسالة تلقائية متكررة داخل القروب بفاصل زمني يحدده الأدمن. يحفظ في MongoDB.",
     author:      "Sixseven-6677",
   };
@@ -253,6 +265,22 @@ class BlackPlugin implements IPlugin {
       fn: async () => {
         const cfg = store.threads[threadId];
         if (!cfg?.active || !cfg.message) return;
+
+        // ── Connectivity guard: skip tick immediately if Facebook is offline ──
+        //
+        // Without this check, the sender waits up to 20s per failed attempt,
+        // and with 4 retry attempts that is 80s of blocking per timer tick.
+        // During a disconnection this creates a thundering-herd of waiting
+        // promises that stall the event loop and log noise.
+        //
+        // mirai-transport.isConnected() returns true only when the MQTT API
+        // object exists — false during login, checkpoint, or circuit-open.
+        // If disconnected, skip this tick silently; the next tick will retry.
+        const transport = pCtx.consumeService<ITransportStatus>("mirai-transport");
+        if (transport && !transport.isConnected()) {
+          pCtx.logger.debug("Black: Facebook disconnected — skipping tick.", { threadId });
+          return;
+        }
 
         const sender = pCtx.consumeService<ISenderService>("facebook-sender");
         if (!sender) {
@@ -439,14 +467,6 @@ class BlackPlugin implements IPlugin {
   private async handleSetMessage(ctx: Context, pCtx: IPluginContext): Promise<void> {
     await ctx.typingOn();
 
-    // ── Preserve ALL whitespace in the user's message ──────────────────────
-    //
-    // ctx.args is tokenised on /\s+/, so ctx.args.slice(1).join(" ") would
-    // collapse every multi-space run and strip every newline the user typed.
-    //
-    // rawBodyAfterArgs(text, 2) strips only the first 2 tokens (commandName
-    // + subcommand "رسالة"/"msg"/"message") from the raw string, then trims
-    // only the single space/tab separator — leaving the rest 100% intact.
     const newMessage = rawBodyAfterArgs(ctx.message.text ?? "", 2);
 
     if (!newMessage) {
@@ -500,6 +520,27 @@ class BlackPlugin implements IPlugin {
       return;
     }
 
+    // ── Minimum interval enforcement ─────────────────────────────────────────
+    //
+    // Facebook's bot-detection flags sessions that send automated messages
+    // faster than ~1/min. Intervals below MIN_INTERVAL_SEC consistently
+    // trigger checkpoints and AppState invalidation within hours of operation.
+    //
+    // This is the primary cause of the "AppState dies after a few hours" pattern.
+    if (seconds < MIN_INTERVAL_SEC) {
+      await ctx.reply([
+        HEADER,
+        "",
+        `⛔ الحد الأدنى للفاصل الزمني هو ${MIN_INTERVAL_SEC} ثانية.`,
+        "",
+        "⚠️ السبب: فيسبوك يكتشف الإرسال السريع كسلوك بوت",
+        "   ويحجب الجلسة ويطلب تحقق هوية (checkpoint).",
+        "",
+        `⌯ استخدم قيمة ≥ ${MIN_INTERVAL_SEC} ثانية — يُنصح بـ 300 ثانية فأكثر.`,
+      ].join("\n"));
+      return;
+    }
+
     const config     = getThread(this.store, ctx.thread.id);
     const wasRunning = config.active && this.activeTimers.has(ctx.thread.id);
 
@@ -522,11 +563,17 @@ class BlackPlugin implements IPlugin {
       ? "⌯ تم تطبيق التغيير فوراً — المؤقت أُعيد تشغيله."
       : "⌯ ستحتاج تشغيل: بلاك تشغيل";
 
+    // Warn if interval is low but above the minimum
+    const riskWarning = seconds < WARN_INTERVAL_SEC
+      ? `\n⚠️ تحذير: ${seconds} ثانية قريب من حد الكشف. يُنصح بـ 300 ثانية+.`
+      : "";
+
     await ctx.reply([
       HEADER,
       "",
       `✅ تم تحديث فترة الإرسال إلى: ${seconds} ثانية`,
       statusLine,
+      riskWarning,
     ].join("\n"));
   }
 
@@ -553,7 +600,7 @@ class BlackPlugin implements IPlugin {
       : "لم تُحدَّد بعد";
 
     const intervalStr = config.intervalSec > 0
-      ? `${config.intervalSec} ثانية`
+      ? `${config.intervalSec} ثانية${config.intervalSec < WARN_INTERVAL_SEC ? " ⚠️" : ""}`
       : "لم يُحدَّد بعد";
 
     const lastSent = config.lastSentAt
@@ -582,7 +629,7 @@ class BlackPlugin implements IPlugin {
       "• بلاك رسالة <النص>",
       "  ↳ تحديد الرسالة التي ستُرسَل تلقائياً",
       "",
-      "• بلاك وقت <الثواني>",
+      `• بلاك وقت <الثواني>  (الحد الأدنى: ${MIN_INTERVAL_SEC}ث)`,
       "  ↳ تحديد فترة الإرسال بالثواني",
       "",
       "• بلاك تشغيل",
