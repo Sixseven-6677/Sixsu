@@ -121,6 +121,28 @@ fs.writeFileSync(fcaConfigPath, JSON.stringify({
   let watchProvider: FileWatchAppStateProvider | null = null;
 
   if (appStateWatchFile) {
+    // One-time seed: on a fresh volume the watched file won't exist yet.
+    // If we already have AppState from FB_APPSTATE / FB_APPSTATE_FILE, write
+    // it once so the watch file starts populated instead of empty. Later
+    // edits to the watch file (or FileWatchAppStateProvider's own encrypted
+    // rewrites) always take precedence over this seed.
+    if (!fs.existsSync(appStateWatchFile)) {
+      const seedRaw = appStateFile
+        ? (() => { try { return fs.readFileSync(appStateFile, "utf8"); } catch { return null; } })()
+        : (appStateVal ?? null);
+
+      if (seedRaw) {
+        try {
+          fs.mkdirSync(path.dirname(appStateWatchFile), { recursive: true });
+          fs.writeFileSync(appStateWatchFile, seedRaw, "utf8");
+          log.info(`Auth: seeded watched file "${appStateWatchFile}" from existing AppState source.`);
+        } catch (seedErr) {
+          const msg = seedErr instanceof Error ? seedErr.message : String(seedErr);
+          log.warn(`Auth: failed to seed watched file "${appStateWatchFile}": ${msg}`);
+        }
+      }
+    }
+
     watchProvider = new FileWatchAppStateProvider({
       filePath:      appStateWatchFile,
       encryptionKey: sessionSecret || "",
