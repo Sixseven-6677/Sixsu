@@ -19,15 +19,16 @@
  *  automatically try email/password when AppState fails during reconnects.
  *  No changes to ReconnectManager are needed.
  */
-import { Bot }                   from "../core/Bot";
-import { AuthManager }           from "../facebook/auth/AuthManager";
-import { EmailPasswordProvider } from "../facebook/auth/EmailPasswordProvider";
-import { AuthPipeline }          from "../facebook/auth/AuthPipeline";
-import { SessionManager }        from "../facebook/session/SessionManager";
-import { SessionStore }          from "../facebook/session/SessionStore";
-import { ReconnectManager }      from "../facebook/reconnect/ReconnectManager";
-import { config }                from "../config/env";
-import { LoggerManager }         from "../logger/LoggerManager";
+import { Bot }                       from "../core/Bot";
+import { AuthManager }               from "../facebook/auth/AuthManager";
+import { EmailPasswordProvider }     from "../facebook/auth/EmailPasswordProvider";
+import { FileWatchAppStateProvider } from "../facebook/auth/FileWatchAppStateProvider";
+import { AuthPipeline }              from "../facebook/auth/AuthPipeline";
+import { SessionManager }            from "../facebook/session/SessionManager";
+import { SessionStore }              from "../facebook/session/SessionStore";
+import { ReconnectManager }          from "../facebook/reconnect/ReconnectManager";
+import { config }                    from "../config/env";
+import { LoggerManager }             from "../logger/LoggerManager";
 import * as fs   from "fs";
 import * as path from "path";
 
@@ -110,10 +111,23 @@ fs.writeFileSync(fcaConfigPath, JSON.stringify({
   }
 
   // ── Register AppState providers ────────────────────────────────────────────
-  const appStateVal  = process.env[config.auth.appStateEnvKey] ?? process.env["FB_APPSTATE"];
-  const appStateFile = config.auth.appStateFile;
+  const appStateVal       = process.env[config.auth.appStateEnvKey] ?? process.env["FB_APPSTATE"];
+  const appStateFile      = config.auth.appStateFile;
+  const appStateWatchFile = config.auth.appStateWatchFile;
 
-  if (appStateFile) {
+  // Watched single-file provider takes priority — lets an operator drop
+  // fresh cookies into one file (Nejin-style) and have the bot pick them up
+  // automatically, without redeploying. See FileWatchAppStateProvider.
+  let watchProvider: FileWatchAppStateProvider | null = null;
+
+  if (appStateWatchFile) {
+    watchProvider = new FileWatchAppStateProvider({
+      filePath:      appStateWatchFile,
+      encryptionKey: sessionSecret || "",
+    });
+    auth.registerAccount("primary", watchProvider);
+    log.info(`Auth: primary account registered from watched file: ${appStateWatchFile}`);
+  } else if (appStateFile) {
     auth.registerAccount("primary", AuthManager.fromFile("primary", appStateFile).provider);
     log.info("Auth: primary account registered from file.");
   } else if (appStateVal) {
@@ -189,6 +203,29 @@ fs.writeFileSync(fcaConfigPath, JSON.stringify({
     maxAttemptsPerWindow:  2,
   });
   bot.register(reconnect);
+
+  // ── Wire up watched-file auto reload (Nejin-style operational override) ────
+  // When an operator manually edits FB_APPSTATE_WATCH_FILE with fresh cookies,
+  // re-authenticate immediately and reset the circuit breaker so the bot does
+  // not stay stuck in CIRCUIT_OPEN waiting for a redeploy.
+  if (watchProvider) {
+    watchProvider.onChange(async () => {
+      log.info('Auth: watched AppState file changed for "primary" — reloading credentials.');
+      const result = await auth.login("primary");
+      if (result.success) {
+        await sessionManager.saveSession("primary");
+        reconnect.resetCircuit("primary");
+        log.info(
+          'Auth: account "primary" re-authenticated from watched file update. Circuit reset.'
+        );
+      } else {
+        log.warn(
+          `Auth: reload from watched file failed for "primary": ${result.error ?? "unknown error"}`
+        );
+      }
+    });
+    watchProvider.startWatching();
+  }
 
   return { auth, sessionManager, reconnect, pipeline };
 }

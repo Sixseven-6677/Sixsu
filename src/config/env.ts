@@ -59,6 +59,12 @@ export const config = {
     appStateEnvKey2: optionalEnv("FB_APPSTATE_ENV_KEY_2", "FB_APPSTATE_2"),
     appStateFile2:   optionalEnv("FB_APPSTATE_FILE_2"),
 
+    // ── Watched state file (Nejin-style single-file session, encrypted at
+    // rest via CryptoHelper). When set, takes priority over appStateFile /
+    // appStateEnvKey for the primary account — an operator can drop fresh
+    // cookies into this file and the bot re-authenticates automatically.
+    appStateWatchFile: optionalEnv("FB_APPSTATE_WATCH_FILE"),
+
     // ── Email/Password fallback (Stage 2 — only used when AppState fails) ─
     // The password value is NEVER read here — only presence is checked.
     // EmailPasswordProvider.fromEnv() reads FB_EMAIL / FB_PASSWORD directly.
