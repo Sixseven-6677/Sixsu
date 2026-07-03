@@ -1,8 +1,13 @@
-export { AuthManager }             from "./AuthManager";
-export { AppStateProvider }        from "./AppStateProvider";
-export { EmailPasswordProvider }   from "./EmailPasswordProvider";
-export { AuthPipeline }            from "./AuthPipeline";
-export { CryptoHelper }            from "./CryptoHelper";
+export { AuthManager }               from "./AuthManager";
+export { AppStateProvider }          from "./AppStateProvider";
+export { FileWatchAppStateProvider } from "./FileWatchAppStateProvider";
+export { EmailPasswordProvider }     from "./EmailPasswordProvider";
+export { AuthPipeline }              from "./AuthPipeline";
+export { CryptoHelper }              from "./CryptoHelper";
+export type {
+  FileWatchChangeHandler,
+  FileWatchAppStateProviderOptions,
+} from "./FileWatchAppStateProvider";
 export type {
   AppState,
   AppStateCookie,
