@@ -4,5 +4,8 @@ nixPkgs = ["nodejs_20", "yt-dlp", "ffmpeg"]
 [phases.install]
 cmds = ["npm install --no-audit"]
 
+[phases.build]
+cmds = ["npm run build"]
+
 [start]
 cmd = "node dist/index.js"
